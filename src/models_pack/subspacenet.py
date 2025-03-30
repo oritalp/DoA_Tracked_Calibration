@@ -415,7 +415,7 @@ class SubspaceNet(ParentModel):
     def __training_step_near_field(self, batch, batch_idx):
         x, sources_num, angles, ranges = self.__prepare_batch_near_field(batch)
         if isinstance(self.train_loss, MusicSpectrumLoss):
-            noise_subspace, source_estimation, eigen_regularization = self(x, sources_num, angles)
+            noise_subspace, source_estimation, eigen_regularization = self(x, sources_num)
             loss = self.train_loss(noise_subspace=noise_subspace, angles=angles, ranges=ranges)
         else:
             angles_pred, distance_pred, source_estimation, eigen_regularization = self(x, sources_num)

@@ -1,3 +1,20 @@
-# DCD-MUSIC: Deep-Learning-Aided Cascaded Differentiable MUSIC Algorithm for Near-Field Localization of Multiple Sources
-## ABSTRACT:
-Future wireless technologies will require accurate localization of multiple users  in the radiative near-field. A leading family of algorithms is based on subspace decomposition of the input covariance and localization by peak-finding over the MUSIC spectrum, which is suitable for non-coherent sources with sufficient snapshots and calibrated arrays. This work introduces DCD-MUSIC that augments MUSIC near-field localization with dedicated DNN, allowing it to operate reliably and interpretably.  DCD-MUSIC utilizes two DNN trained to produce two surrogate covariances, one from which the angles and number of sources is recovered, and one used to compute the range MUSIC spectrum. This is achieved by introducing a novel learning method that $(i)$ facilitates division into signal and noise subspaces; and $(ii)$ converts MUSIC into a differentiable machine learning model. Our results  show that DCD-MUSIC successfully localizes multiple coherent near-field and far-field sources.
+# Near Field Localization via AI-Aided Subspace Methods
+
+## Related Publications
+- [1] [DCD-MUSIC: Deep-Learning-Aided Cascaded Differentiable MUSIC Algorithm for Near-Field Localization of Multiple Sources](https://ieeexplore.ieee.org/abstract/document/10888295)
+- [2] [Near Field Localization via AI-Aided Subspace Methods](TBD)
+
+## Introduction
+This repository contain the implementation of the AI-aided subspace methods for near-field localizaiton:
+- DCD-MUSIC
+- NF-SSN
+
+## Getting Started
+### Prerequisites
+- Python 3.10+
+### Installation
+- init a new virtual environment
+- activate the virtual environment
+- Go to [Pytorch official website](https://pytorch.org/) to install the correct version of Pytorch
+- Install the required packages by running `pip install -r requirements.txt`
+- See example usage in 'main.py'

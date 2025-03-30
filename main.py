@@ -40,10 +40,10 @@ scenario_dict = {
 
 simulation_commands = {
     "SAVE_TO_FILE": False,
-    "CREATE_DATA": False,
+    "CREATE_DATA": True,
     "SAVE_DATASET": False,
     "LOAD_MODEL": False,
-    "TRAIN_MODEL": False,
+    "TRAIN_MODEL": True,
     "SAVE_MODEL": False,
     "EVALUATE_MODE": True,
     "PLOT_RESULTS": True,  # if True, the learning curves will be plotted
@@ -53,8 +53,8 @@ simulation_commands = {
 }
 
 system_model_params = {
-    "N": 64,  # number of antennas
-    "M": 5,  # number of sources
+    "N": 15,  # number of antennas
+    "M": 2,  # number of sources
     "T": 100,  # number of snapshots
     "snr": 10,  # if defined, values in scenario_dict will be ignored
     "field_type": "near",  # Near, Far
@@ -96,11 +96,11 @@ elif model_config.get("model_type") == "DeepCNN":
     model_config["model_params"]["grid_size"] = 361
 
 training_params = {
-    "samples_size": 10000,
-    "train_test_ratio": 1/10,
+    "samples_size": 1024,
+    "train_test_ratio": 0.1,
     "training_objective": "angle, range",  # angle, range, source_estimation
     "batch_size": 32,
-    "epochs": 0,
+    "epochs": 2,
     "optimizer": "Adam",  # Adam, SGD
     "scheduler": "ReduceLROnPlateau",  # StepLR, ReduceLROnPlateau
     "learning_rate": 0.001,

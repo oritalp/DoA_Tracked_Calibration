@@ -48,7 +48,7 @@ class DCDMUSIC(ParentModel):
             with torch.no_grad():
                 self.angle_branch.eval()
                 angles, sources_estimation, _ = self.angle_branch_forward(x, number_of_sources)
-            known_angles = ground_truth_angles if not self.train_angle_extractor and ground_truth_angles is not None and self.use_gt else angles
+            known_angles = ground_truth_angles if self.train_mode == "range" and ground_truth_angles is not None and self.use_gt else angles
             distances = self.range_branch_forward(x, number_of_sources=number_of_sources, known_angles=known_angles)
             return known_angles, distances, None, None
         elif self.train_mode == "position":

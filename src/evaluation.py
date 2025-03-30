@@ -43,7 +43,6 @@ from src.methods_pack.music import MUSIC
 from src.methods_pack.root_music import RootMusic, root_music
 from src.methods_pack.esprit import ESPRIT
 from src.methods_pack.beamformer import Beamformer
-from src.methods_pack.music_tops import TOPS
 from src.methods_pack.csestimator import CsEstimator
 from src.models import (ModelGenerator, SubspaceNet, DCDMUSIC, DeepAugmentedMUSIC,
                         DeepCNN, DeepRootMUSIC, TransMUSIC)

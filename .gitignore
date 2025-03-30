@@ -1,5 +1,4 @@
 .idea/
-*.txt
 *.ini
 __pycache__/
 .venv*/

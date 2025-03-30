@@ -16,7 +16,7 @@ from src.signal_creation import Samples
 from src.models import ModelGenerator
 
 # default values for the argparse
-number_sensors = 64
+number_sensors = 15
 number_sources = "2"
 number_snapshots = 100
 snr = 10
@@ -28,7 +28,7 @@ wavelength = 1
 tau = 8
 sample_size = 1028
 batch_size = 128
-epochs = 10
+epochs = 1
 optimizer = "Adam"
 scheduler = "ReduceLROnPlateau"
 learning_rate = 0.001
@@ -40,7 +40,7 @@ train_loss_type = ("rmspe", "rmspe")
 regularization = None
 variant = "small"
 wandb_flag = False
-skip_first_step = True
+skip_first_step = False
 skip_second_step = False
 
 def train_dcd_music(*args, **kwargs):
@@ -262,7 +262,7 @@ if __name__ == "__main__":
     }
     simulation_commands = {
         "SAVE_TO_FILE": False,
-        "CREATE_DATA": False,
+        "CREATE_DATA": True,
         "LOAD_MODEL": True,
         "SAVE_MODEL": False,
     }
