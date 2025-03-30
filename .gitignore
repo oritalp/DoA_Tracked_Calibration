@@ -1,0 +1,11 @@
+.idea/
+*.txt
+*.ini
+__pycache__/
+.venv*/
+data/
+src/__pycache__/
+weights/
+wandb/
+*.png
+*.pdf
