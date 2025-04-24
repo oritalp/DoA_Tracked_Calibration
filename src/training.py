@@ -348,7 +348,7 @@ class Trainer:
                                        gamma=self.training_params["gamma"])
         elif scheduler == "ReduceLROnPlateau":
             return lr_scheduler.ReduceLROnPlateau(self.optimizer, mode="min", factor=self.training_params["gamma"],
-                                                  patience=10, verbose=True)
+                                                  patience=10)
         else:
             raise ValueError(f"Scheduler {scheduler} is not defined.")
 

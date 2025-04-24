@@ -32,10 +32,10 @@ class DCDMUSIC(ParentModel):
         self.angle_branch, self.range_branch = None, None # Holders for the angle and range branches
         self.__init_angle_branch(load_angle_branch, diff_method[0]) if angle_extractor is None else angle_extractor
         self.__init_range_branch(load_range_branch, diff_method[1])
-        self.train_mode = None
+        self.train_mode = "position" # Default to position mode
         # self.update_train_mode("angle") # "angle", "range" or "position"
         self.train_loss, self.validation_loss = None, None
-        # self.__set_criterion()
+        self.__set_criterion()
         self.use_gt = True
         if self.use_gt:
             self.range_branch.diff_method.init_cells(0.05)
@@ -51,7 +51,7 @@ class DCDMUSIC(ParentModel):
             known_angles = ground_truth_angles if self.train_mode == "range" and ground_truth_angles is not None and self.use_gt else angles
             distances = self.range_branch_forward(x, number_of_sources=number_of_sources, known_angles=known_angles)
             return known_angles, distances, None, None
-        elif self.train_mode == "position":
+        elif self.train_mode == "position" or self.train_mode is None: # Default to position mode
             angles, sources_estimation, eigen_regularization = self.angle_branch_forward(x, number_of_sources)
             distances = self.range_branch_forward(x, number_of_sources, known_angles=angles)
             return angles, distances, sources_estimation, eigen_regularization
@@ -75,9 +75,9 @@ class DCDMUSIC(ParentModel):
                              f"Number of sources in the batch is not equal for all samples.")
         sources_num = sources_num[0]
         angles, ranges = torch.split(labels, sources_num, dim=1)
-        x = x.requires_grad_(True).to(self.device)
-        angles = angles.requires_grad_(True).to(self.device)
-        ranges = ranges.requires_grad_(True).to(self.device)
+        x = x.to(self.device)
+        angles = angles.to(self.device)
+        ranges = ranges.to(self.device)
         eigen_regularization, sources_estimation = None, None
         if self.train_mode == "angle":
             angles_pred, sources_estimation, eigen_regularization = self(x, sources_num)

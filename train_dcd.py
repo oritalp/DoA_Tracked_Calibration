@@ -26,9 +26,9 @@ signal_nature = "coherent"
 err_loc_sv = 0.0
 wavelength = 1
 tau = 8
-sample_size = 1028
+sample_size = 4096
 batch_size = 128
-epochs = 1
+epochs = 50
 optimizer = "Adam"
 scheduler = "ReduceLROnPlateau"
 learning_rate = 0.001
@@ -262,9 +262,9 @@ if __name__ == "__main__":
     }
     simulation_commands = {
         "SAVE_TO_FILE": False,
-        "CREATE_DATA": True,
-        "LOAD_MODEL": True,
-        "SAVE_MODEL": False,
+        "CREATE_DATA": False,
+        "LOAD_MODEL": False,
+        "SAVE_MODEL": True,
     }
     train_dcd_music(simulation_commands=simulation_commands,
                     system_model_params=system_model_params,

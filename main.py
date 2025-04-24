@@ -40,11 +40,11 @@ scenario_dict = {
 
 simulation_commands = {
     "SAVE_TO_FILE": False,
-    "CREATE_DATA": True,
-    "SAVE_DATASET": False,
+    "CREATE_DATA": False,
+    "SAVE_DATASET": True,
     "LOAD_MODEL": False,
     "TRAIN_MODEL": True,
-    "SAVE_MODEL": False,
+    "SAVE_MODEL": True,
     "EVALUATE_MODE": True,
     "PLOT_RESULTS": True,  # if True, the learning curves will be plotted
     "PLOT_LOSS_RESULTS": True,  # if True, the RMSE results of evaluation will be plotted
@@ -96,11 +96,11 @@ elif model_config.get("model_type") == "DeepCNN":
     model_config["model_params"]["grid_size"] = 361
 
 training_params = {
-    "samples_size": 1024,
+    "samples_size": 4096,
     "train_test_ratio": 0.1,
     "training_objective": "angle, range",  # angle, range, source_estimation
-    "batch_size": 32,
-    "epochs": 2,
+    "batch_size": 128,
+    "epochs": 50,
     "optimizer": "Adam",  # Adam, SGD
     "scheduler": "ReduceLROnPlateau",  # StepLR, ReduceLROnPlateau
     "learning_rate": 0.001,
@@ -123,25 +123,23 @@ evaluation_params = {
         #             "model_name": "DCD-MUSIC",
         #             "tau": 8,
         #             "diff_method": ("esprit", "music_1d"),
-        #             "train_loss_type": ("rmspe", "rmspe"),
-        #             "regularization": "aic",
+        #             "regularization": None,
         #               },
         #  "DCD-MUSIC_V2": {
         #             "model_name": "DCD-MUSIC",
         #             "tau": 8,
         #             "diff_method": ("esprit", "music_1d"),
-        #             "train_loss_type": ("rmspe", "rmspe"),
         #             "regularization": "aic",
         #             "variant": "big"
         #               },
         # "NFSubspaceNet": {
-                        # "model_name": "SubspaceNet",
-                        # "tau": 8,
-                        # "diff_method": "music_2D",
-                        # "train_loss_type": "music_spectrum",
-                        # "field_type": "near",
-                        # "regularization": "aic",
-                        # },
+        #                 "model_name": "SubspaceNet",
+        #                 "tau": 8,
+        #                 "diff_method": "music_2D",
+        #                 "train_loss_type": "music_spectrum",
+        #                 "field_type": "near",
+        #                 "regularization": None,
+        #                 },
         # "NFSubspaceNet_V2": {
         #                 "model_name": "SubspaceNet",
         #                 "tau": 8,

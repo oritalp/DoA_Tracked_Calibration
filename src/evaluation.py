@@ -100,8 +100,8 @@ def get_model(params: dict, system_model_params: SystemModelParams, model_name: 
     try:
         model.load_state_dict(torch.load(path+".pt", map_location=device, weights_only=True))
         print(f"get_model: {model._get_name()}'s weights loaded succesfully from {path}")
-        if isinstance(model, DCDMUSIC):
-            model._load_state_for_angle_extractor()
+    #     if isinstance(model, DCDMUSIC):
+    #         model._load_state_for_angle_extractor()
     except FileNotFoundError as e:
         print("####################################")
         raise e
@@ -115,7 +115,7 @@ def get_model(params: dict, system_model_params: SystemModelParams, model_name: 
         #     print(e)
         #     print("####################################")
         #     warnings.warn(f"get_model: Model {model_name}'s weights not found")
-    return model.to(device).eval()
+    return model.to(device)
 
 
 def evaluate_dnn_model(model: nn.Module, dataset: DataLoader, mode: str="valid") -> dict:
