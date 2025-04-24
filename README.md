@@ -13,10 +13,12 @@ This repository contain the implementation of the AI-aided subspace methods for 
 ### Prerequisites
 - Python 3.10+
 ### Installation
-- init a new virtual environment
-- activate the virtual environment
-- Go to [Pytorch official website](https://pytorch.org/) to install the correct version of Pytorch
-- Install the required packages by running `pip install -r requirements.txt`
+- Init a new virtual environment
+  - For conda, `conda env create -f full_environment.yml` and active it by `conda activate ai_subspace_env`
+  - For venv, `py -m venv ai_subspace_env`
+    - Activate the virtual environment
+    - Go to [Pytorch official website](https://pytorch.org/) to install the correct version of Pytorch
+    - Install the required packages by running `pip install -r requirements.txt`
 - See example usage in 'main.py'
 
 ## Citation
