@@ -1,6 +1,7 @@
 .idea/
 *.ini
 __pycache__/
+**/*.pyc
 .venv*/
 data/
 src/__pycache__/
@@ -8,3 +9,5 @@ weights/
 wandb/
 *.png
 *.pdf
+*.out
+*.sh

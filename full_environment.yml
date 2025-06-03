@@ -1,4 +1,4 @@
-name: ai_subspace_env
+name: calibration_through_doa
 channels:
   - conda-forge
   - defaults
