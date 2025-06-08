@@ -58,10 +58,10 @@ def __run_simulation(**kwargs):
         gain_impairments_norm = torch.linalg.norm(gain_impairments, ord=2, dim=0) #just for testing purposes
         # Save the created data under the data_path
         utils.save_data_to_file(data_saving_path, measurements, signals, steering_mat,
-                                 noise, true_angles, array, gain_impairments)
+                                 noise, true_angles, array, gain_impairments, system_model_params)
     else:
         # Load data from file
-        measurements, signals, steering_mat, noise, true_angles, array, gain_impairments = \
+        measurements, signals, steering_mat, noise, true_angles, array, gain_impairments, system_model_params = \
             utils.load_data_from_file(data_loading_path)
     return None
 
