@@ -121,51 +121,51 @@ def initialize_paths(main_path: Path, system_model_params, dt_string_for_save: s
 
     return datasets_path, results_path
 
-# def sample_covariance(x: torch.Tensor) -> torch.Tensor:
-#     """
-#     Calculates the sample covariance matrix for each element in the batch.
+def sample_covariance(x: torch.Tensor) -> torch.Tensor:
+    """
+    Calculates the sample covariance matrix for each element in the batch.
 
-#     Args:
-#     -----
-#         X (np.ndarray): Input samples matrix.
+    Args:
+    -----
+        X (np.ndarray): Input samples matrix.
 
-#     Returns:
-#     --------
-#         covariance_mat (np.ndarray): Covariance matrix.
-#     """
-#     if x.dim() == 2:
-#         x = x[None, :, :]
-#     batch_size, sensor_number, samples_number = x.shape
-#     Rx = torch.einsum("bmt, btl -> bml", x, torch.conj(x).transpose(1, 2)) / samples_number
-#     return Rx
+    Returns:
+    --------
+        covariance_mat (np.ndarray): Covariance matrix.
+    """
+    if x.dim() == 2:
+        x = x.unsqueeze(0)  # Add batch dimension if not present
+    batch_size, sensor_number, samples_number = x.shape
+    Rx = torch.einsum("bmt, btl -> bml", x, torch.conj(x).transpose(1, 2)) / samples_number
+    return Rx
 
-# def spatial_smoothing_covariance(x: torch.Tensor):
-#     """
-#     Calculates the covariance matrix using spatial smoothing technique for each element in the batch.
+def spatial_smoothing_covariance(x: torch.Tensor):
+    """
+    Calculates the covariance matrix using spatial smoothing technique for each element in the batch.
 
-#     Args:
-#     -----
-#         X (np.ndarray): Input samples matrix.
+    Args:
+    -----
+        X (np.ndarray): Input samples matrix.
 
-#     Returns:
-#     --------
-#         covariance_mat (np.ndarray): Covariance matrix.
-#     """
+    Returns:
+    --------
+        covariance_mat (np.ndarray): Covariance matrix.
+    """
 
-#     if x.dim() == 2:
-#         x = x[None, :, :]
-#     batch_size, sensor_number, samples_number = x.shape
-#     # Define the sub-arrays size
-#     sub_array_size = sensor_number // 2 + 1
-#     # Define the number of sub-arrays
-#     number_of_sub_arrays = sensor_number - sub_array_size + 1
-#     # Initialize covariance matrix
-#     Rx_smoothed = torch.zeros(batch_size, sub_array_size, sub_array_size, dtype=torch.complex128, device=device)
-#     Rx = sample_covariance(x)
-#     for j in range(number_of_sub_arrays):
-#         Rx_smoothed += Rx[:, j:j + sub_array_size, j:j + sub_array_size] / number_of_sub_arrays
-#     # Divide overall matrix by the number of sources
-#     return Rx_smoothed
+    if x.dim() == 2:
+        x = x[None, :, :]
+    batch_size, sensor_number, samples_number = x.shape
+    # Define the sub-arrays size
+    sub_array_size = sensor_number // 2 + 1
+    # Define the number of sub-arrays
+    number_of_sub_arrays = sensor_number - sub_array_size + 1
+    # Initialize covariance matrix
+    Rx_smoothed = torch.zeros(batch_size, sub_array_size, sub_array_size, dtype=torch.complex128, device=device)
+    Rx = sample_covariance(x)
+    for j in range(number_of_sub_arrays):
+        Rx_smoothed += Rx[:, j:j + sub_array_size, j:j + sub_array_size] / number_of_sub_arrays
+    # Divide overall matrix by the number of sources
+    return Rx_smoothed
 
 # def tops_covariance(x: torch.Tensor, number_of_bins: int=1):
 #     """

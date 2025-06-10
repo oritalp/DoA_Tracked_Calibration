@@ -7,8 +7,7 @@ import warnings
 
 
 from src.utils import sample_covariance, spatial_smoothing_covariance
-from src.system_model import SystemModel
-from src.config import device
+
 
 
 class SubspaceMethod(nn.Module):
@@ -16,9 +15,9 @@ class SubspaceMethod(nn.Module):
     Basic methods for all subspace methods.
     """
 
-    def __init__(self, system_model: SystemModel, model_order_estimation: str = None):
+    def __init__(self, system_model, model_order_estimation: str = None):
         super(SubspaceMethod, self).__init__()
-        self.device = device
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.system_model = system_model
         self.eigen_threshold = nn.Parameter(torch.tensor(.5, requires_grad=False))
         self.normalized_eigenvals = None
@@ -28,15 +27,16 @@ class SubspaceMethod(nn.Module):
     def subspace_separation(self,
                             covariance: torch.Tensor,
                             number_of_sources: torch.tensor = None) \
-            -> (torch.Tensor, torch.Tensor, torch.Tensor, torch.tensor):
+            -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.tensor]:
         """
 
         Args:
-            covariance:
-            number_of_sources:
+            covariance: from size (B, N, N) where B is the batch size and N is the number of antennas.
+            number_of_sources: if None it estimates the number of sources using the model_order_estimation method.
 
         Returns:
-            the signal ana noise subspaces, both as torch.Tensor().
+            the signal and noise subspaces, both as torch.Tensor(), number of sources estimation, 
+            and the regularization term for the eigenvalues (not used for now).
         """
         eigenvalues, eigenvectors = torch.linalg.eigh(covariance)
         sorted_idx = torch.argsort(torch.abs(eigenvalues), descending=True)

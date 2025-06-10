@@ -75,9 +75,12 @@ system_model_params = {
     "signal_nature": "non-coherent"  # if defined, values in scenario_dict will be ignored
 
 }
+
+system_model_params["device"] = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
 model_config = {
     "model_type": "diffMUSIC",  # diffMUSIC
-    "model_params": {}
+    "model_params": {"window_size": 21}
 }
 
 
@@ -91,7 +94,7 @@ training_params = {
     "use_wandb": False
 }
 
-training_params["device"] = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
 
 
 def parse_arguments():

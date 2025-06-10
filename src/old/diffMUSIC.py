@@ -76,113 +76,13 @@ class DiffMUSIC(nn.Module):
             temperature: Temperature for soft peak finding
             cell_size_coeff: Coefficient for cell size in soft peak finding
         """
-        super().__init__()
+        super().__init__(system_model_params, 
+                         init_antenna_positions, 
+                         init_antenna_gains, 
+                         gain_constraint, 
+                         temperature, 
+                         cell_size_coeff)
         
-        self.params = system_model_params
-        self.N = self.params.N  # Number of antennas
-        self.M = self.params.M  # Number of sources
-        self.gain_constraint = gain_constraint
-        self.temperature = temperature
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        
-        # Initialize antenna positions as learnable parameters
-        if init_antenna_positions is None:
-            init_antenna_positions = torch.arange(self.N, dtype=torch.float64) * (self.params.wavelength / 2)
-        
-        self.antenna_positions = nn.Parameter(init_antenna_positions.clone())
-        assert init_antenna_positions.requires_grad is True, "Initial antenna positions must be a differentiable tensor."
-
-        # Initialize antenna gains as learnable parameters
-        if init_antenna_gains is None:
-            init_antenna_gains = torch.ones(self.N, dtype=torch.complex64)
-        self.antenna_gains = nn.Parameter(init_antenna_gains.clone())
-        
-        # Initialize angle grid for far-field DOA estimation
-        self._init_angle_grid()
-        
-        # Initialize cell size for soft peak finding
-        self.cell_size = int(self.angles_dict.shape[0] * cell_size_coeff)
-        if self.cell_size % 2 == 0:
-            self.cell_size += 1
-            
-        # Store current MUSIC spectrum for analysis
-        self.music_spectrum = None
-        
-    def _init_angle_grid(self):
-        """Initialize angle grid for DOA estimation"""
-        angle_range = np.deg2rad(self.params.doa_range)
-        angle_resolution = np.deg2rad(self.params.doa_resolution / 2) # Higher resolution by 2 than the original grid.
-        angle_decimals = int(np.ceil(np.log10(1 / angle_resolution))) #Formula to determine floating point accuracy based on the resolution.
-        
-        self.angles_dict = torch.arange(-angle_range, angle_range + angle_resolution, 
-                                      angle_resolution, dtype=torch.float64)
-        self.angles_dict = torch.round(self.angles_dict, decimals=angle_decimals)
-    
-    def _apply_position_constraints(self):
-        """Reorders the antenna positions, ensuring we don't get stucked if some replace positions.
-           I don't think we need this because it is mathematically fine that thy will replace order.
-           In fact, this replacement may occur some incontinuity in the loss.
-           We do need to keep it in mind though.
-           """
-        # with torch.no_grad():
-        #     if self.position_constraint == "ula":
-        #         sorted_positions, _ = torch.sort(self.antenna_positions)
-        #         self.antenna_positions.data = sorted_positions
-        pass
-    
-    def _apply_gain_constraints(self):
-        """Prevent extrme gains from future random walk. For now i leave commented."""
-        # with torch.no_grad():
-        #     if self.gain_constraint == "positive":
-        #         # Just clamp to reasonable ranges to prevent numerical issues
-        #         real_part = torch.clamp(self.antenna_gains.real, min=0.1, max=10.0)
-        #         imag_part = torch.clamp(self.antenna_gains.imag, min=-2.0, max=2.0)
-        #         self.antenna_gains.data = torch.complex(real_part, imag_part, dtype=torch.complex64)
-        pass
-    
-    def get_constrained_parameters(self):
-        """Get antenna parameters without any sorting - order doesn't matter mathematically"""
-        positions = self.antenna_positions
-        gains = self.antenna_gains
-        return positions, gains
-    
-#NOTE: ORI - I read up to this point.
-    
-    def compute_steering_matrix(self, angles: torch.Tensor):
-        """
-        Compute steering matrix for far-field sources using current antenna configuration.
-        Follows the pattern from your SystemModel.steering_vec_far_field method.
-        
-        Args:
-            angles: DOA angles in radians [num_angles]
-            
-        Returns:
-            Complex steering matrix [N, num_angles]
-        """
-        positions, gains = self.get_constrained_parameters()
-        
-        # Convert angles to proper shape for broadcasting
-        if angles.dim() == 1:
-            angles = angles.unsqueeze(0)  # [1, num_angles]
-        
-        # Reshape positions for broadcasting: [N, 1]
-        positions = positions.view(-1, 1)
-        
-        # Compute phase delays: [N, 1] * sin([1, num_angles]) -> [N, num_angles]
-        time_delay = positions @ torch.sin(angles)
-        
-        # Compute steering vectors (following your formula)
-        steering_matrix = torch.exp(-2j * torch.pi * time_delay / self.params.wavelength)
-        steering_matrix = steering_matrix.to(torch.complex64)
-        
-        # Apply antenna gains
-        gains_diag = torch.diag(gains)
-        
-        # Normalize gains (following your normalization pattern)
-        normalization_factor = 1 / torch.linalg.norm(gains, ord=2)
-        steering_matrix = normalization_factor * gains_diag @ steering_matrix
-        
-        return steering_matrix
     
     def sample_covariance(self, x: torch.Tensor) -> torch.Tensor:
         """

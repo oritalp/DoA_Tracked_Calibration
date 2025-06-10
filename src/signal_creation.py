@@ -78,7 +78,7 @@ class SystemModel:
     
     #TODO: Check that the steering matrix is implemented correctly for the far-field case
     
-    def steering_vec_far_field(self, angles: np.ndarray) -> torch.Tensor:
+    def steering_vec_far_field(self, angles: np.ndarray | torch.tensor) -> torch.Tensor:
         """
         Compute far-field steering vectors
         
@@ -154,7 +154,7 @@ class Samples(SystemModel):
         super().__init__(system_model_params)
         self.angles = None
     
-    def set_labels(self, angles: list = None):
+    def set_labels(self, angles: list | None = None):
         """
         Set the angles for the sources
         
@@ -167,7 +167,7 @@ class Samples(SystemModel):
         """Get the current source angles as tensor"""
         return torch.tensor(self.angles, dtype=torch.float32)
     
-    def set_angles(self, doa: list = None):
+    def set_angles(self, doa: list | None = None):
         """
         Set direction of arrival angles
         

@@ -7,10 +7,11 @@ import warnings
 
 
 from src.utils import sample_covariance, spatial_smoothing_covariance
-from src.system_model import SystemModel
-from src.config import device
+from src.signal_creation import SystemModel
 
 
+
+#TODO: Haven't really checked the code here yet, just inheritrs for now.
 class SubspaceMethod(nn.Module):
     """
     Basic methods for all subspace methods.
@@ -18,7 +19,7 @@ class SubspaceMethod(nn.Module):
 
     def __init__(self, system_model: SystemModel, model_order_estimation: str = None):
         super(SubspaceMethod, self).__init__()
-        self.device = device
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.system_model = system_model
         self.eigen_threshold = nn.Parameter(torch.tensor(.5, requires_grad=False))
         self.normalized_eigenvals = None
@@ -28,7 +29,7 @@ class SubspaceMethod(nn.Module):
     def subspace_separation(self,
                             covariance: torch.Tensor,
                             number_of_sources: torch.tensor = None) \
-            -> (torch.Tensor, torch.Tensor, torch.Tensor, torch.tensor):
+            -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.tensor]:
         """
 
         Args:
