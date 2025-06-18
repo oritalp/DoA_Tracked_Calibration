@@ -15,7 +15,8 @@ class SubspaceMethod(nn.Module):
     Basic methods for all subspace methods.
     """
 
-    def __init__(self, system_model, model_order_estimation: str = None):
+    def __init__(self, system_model, model_order_estimation: str = None,
+                 physical_array: torch.Tensor = None, physical_gains: torch.Tensor = None):
         super(SubspaceMethod, self).__init__()
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.system_model = system_model
@@ -23,6 +24,8 @@ class SubspaceMethod(nn.Module):
         self.normalized_eigenvals = None
         self.normalized_eigenvals_mean = None
         self.model_order_estimation = model_order_estimation
+        self.physical_array = physical_array
+        self.physical_gains = physical_gains
 
     def subspace_separation(self,
                             covariance: torch.Tensor,

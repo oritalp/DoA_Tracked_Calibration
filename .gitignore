@@ -11,3 +11,4 @@ wandb/
 *.pdf
 *.out
 *.sh
+./datasets/

@@ -17,6 +17,7 @@ import src.utils as utils
 from datetime import datetime
 import torch
 import numpy as np
+from doa_runner import DoARunner
 
 
 def __run_simulation(**kwargs):
@@ -24,46 +25,99 @@ def __run_simulation(**kwargs):
     SYSTEM_MODEL_PARAMS = kwargs["system_model_params"]
     MODEL_CONFIG = kwargs["model_config"]
     TRAINING_PARAMS = kwargs["training_params"]
-    create_data = SIMULATION_COMMANDS["CREATE_DATA"]  # Creating new dataset
-    load_data = SIMULATION_COMMANDS["LOAD_DATA"]  # Load specific model for training
+    plot_results = SIMULATION_COMMANDS["plot_results"]
+    create_data = SIMULATION_COMMANDS["create_data"]  # Creating new dataset
+    save_data = SIMULATION_COMMANDS["save_data"]  # Save created data to file
+    load_data = SIMULATION_COMMANDS["load_data"]  # Load specific model for training
 
     print("Running simulation...")
-
 
     now = datetime.now()
     plot_path = Path(__file__).parent / "plots"
     plot_path.mkdir(parents=True, exist_ok=True)
     dt_string_for_save = now.strftime("%d_%m_%Y_%H_%M")
-    # torch.set_printoptions(precision=12)
-
+    
     # Initialize seed
     utils.set_unified_seed(SYSTEM_MODEL_PARAMS["seed"])
 
+    # Define system model parameters - unify all parameters
+    system_model_params = SystemModelParams(**SYSTEM_MODEL_PARAMS, **MODEL_CONFIG, **TRAINING_PARAMS, **SIMULATION_COMMANDS)
     
-    # Define system model parameters
-    system_model_params = SystemModelParams(**SYSTEM_MODEL_PARAMS)
+    # Add dt_string for wandb project naming
+    system_model_params.dt_string_for_save = dt_string_for_save
+    
     # Initialize paths
+    #TODO: change the paths to be per model_connfig["model_type"]
     data_saving_path, results_path = utils.initialize_paths(Path(__file__).parent, system_model_params,
                                                             dt_string_for_save)
     data_loading_path = SIMULATION_COMMANDS["data_loading_path"] #ONLY USED if CREATE_DATA is False!
-    # Create system model
+
+    # Prepare data dictionary
+    data_dict = {}
 
     if create_data:
         signals_creator = Samples(system_model_params)
         signals_creator.set_labels(None) # creates random angles
         measurements, signals, steering_mat, noise = signals_creator.samples_creation()
         true_angles = signals_creator.get_labels()
-        array = signals_creator.get_array()
-        gain_impairments = signals_creator.get_gain_perturbations()
-        gain_impairments_norm = torch.linalg.norm(gain_impairments, ord=2, dim=0) #just for testing purposes
+        physical_array = signals_creator.get_array()
+        physical_antennas_gains = signals_creator.get_antenna_gains()
+        antennas_gains_norm = torch.linalg.norm(physical_antennas_gains, ord=2, dim=0) #just for testing purposes
+        
+        # Pack data into dictionary
+        data_dict = {
+            'measurements': measurements,
+            'signals': signals,
+            'steering_matrix': steering_mat,
+            'noise': noise,
+            'true_angles': true_angles,
+            'physical_array': physical_array,
+            'physical_antennas_gains': physical_antennas_gains
+        }
+        
         # Save the created data under the data_path
-        utils.save_data_to_file(data_saving_path, measurements, signals, steering_mat,
-                                 noise, true_angles, array, gain_impairments, system_model_params)
+        if save_data:
+            utils.save_data_to_file(data_saving_path, measurements, signals, steering_mat,
+                                    noise, true_angles, physical_array, physical_antennas_gains, system_model_params)
     else:
         # Load data from file
-        measurements, signals, steering_mat, noise, true_angles, array, gain_impairments, system_model_params = \
-            utils.load_data_from_file(data_loading_path)
-    return None
+        loaded_data = utils.load_data_from_file(data_loading_path)
+        measurements, signals, steering_mat, noise, true_angles, physical_array, physical_antennas_gains, system_model_params = loaded_data
+        
+        # Add dt_string for wandb project naming (in case of loaded data)
+        system_model_params.dt_string_for_save = dt_string_for_save
+        
+        # Pack loaded data into dictionary
+        data_dict = {
+            'measurements': measurements,
+            'signals': signals,
+            'steering_matrix': steering_mat,
+            'noise': noise,
+            'true_angles': true_angles,
+            'physical_array': physical_array,
+            'physical_antennas_gains': physical_antennas_gains
+        }
+
+    # Create and run DoA algorithm
+    print(f"Running {system_model_params.model_type} algorithm...")
+    doa_runner = DoARunner(system_model_params, data_dict)
+    results = doa_runner.run()
+    if plot_results:
+        doa_runner.plot_graphs(results_path)
+    
+    # Save results
+    results_file = results_path / "results.pkl"
+    utils.save_data_to_file(results_path, results, system_model_params)
+    
+    # Save trained model if training was performed
+    if doa_runner._needs_training():
+        model_file = results_path / "trained_model.pth"
+        doa_runner.save_model(model_file)
+    
+    print(f"Results saved to: {results_path}")
+    print(f"RMSPE: {results.get('rmspe', 'N/A'):.6f}")
+    
+    return results
 
 
 def run_simulation(**kwargs):
@@ -78,8 +132,8 @@ def run_simulation(**kwargs):
     """
     #TODO: check if anything is missing for the scenario_dict option once needed.
     if kwargs["scenario_dict"] == {}:
-        loss = __run_simulation(**kwargs)
-        return loss
+        results = __run_simulation(**kwargs)
+        return results
     
     # from this on the option of multiple scenarios is used. this is activated when we specify the sceario_dict
     # in main.py 

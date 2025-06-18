@@ -3,7 +3,12 @@ import torch
 from random import sample
 
 class SystemModelParams:
+    """
+    Parameters for the for the simulation at one claass.
+    """
+
     def __init__(self, **kwargs):
+        kwargs = {**kwargs}
         for key, value in kwargs.items():
             if isinstance(value, str):
                 value = value.lower()
@@ -78,7 +83,7 @@ class SystemModel:
     
     #TODO: Check that the steering matrix is implemented correctly for the far-field case
     
-    def steering_vec_far_field(self, angles: np.ndarray | torch.tensor) -> torch.Tensor:
+    def steering_vec_far_field(self, angles: np.ndarray | torch.Tensor) -> torch.Tensor:
         """
         Compute far-field steering vectors
         
@@ -129,7 +134,7 @@ class SystemModel:
         """
         return self.array
 
-    def get_gain_perturbations(self):
+    def get_antenna_gains(self):
         """
         Get the gain perturbation applied to the steering vector
         

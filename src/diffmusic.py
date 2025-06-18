@@ -21,12 +21,14 @@ import scipy as sc
 from src.subspace_method import SubspaceMethod
 from src.signal_creation import SystemModel
 from src.utils import *
+from src.metrics import SpectrumLoss, UnsupervisedSpectrumLoss, RMSPELoss
 # from src.metrics import RMSPELoss
 
 
 class DiffMUSIC(SubspaceMethod):
     """
-    Differentiable MUSIC (diffMUSIC) implementation for DoA estimation with hardware impairment learning.
+    Differentiable MUSIC (diffMUSIC) and classical MUSIC implementation for DoA estimation with hardware impairment learning.
+    When model.training = True it runs diffMUSIC, otherwise, it runs classical MUSIC.
     
     This implementation is focused on:
     - Far-field scenarios only
@@ -40,8 +42,8 @@ class DiffMUSIC(SubspaceMethod):
     - Softmax-based peak finding for differentiability
     """
 
-    def __init__(self, system_model_params, N: int, 
-                 window_size: int = 21, model_order_estimation: str = None):
+    def __init__(self, system_model_params, N: int, model_order_estimation: str = None,
+                 physical_array: torch.Tensor = None, physical_gains: torch.Tensor = None):
         """
         Initialize diffMUSIC
         
@@ -49,16 +51,16 @@ class DiffMUSIC(SubspaceMethod):
             system_model: System model object (kept for compatibility)
             N: Number of antennas
             wavelength: Signal wavelength  
-            window_size: Size of angular window for softmax peak finding
             model_order_estimation: Model order estimation method
         """
         system_model = SystemModel(system_model_params)
-        super().__init__(system_model, model_order_estimation=model_order_estimation)
+        super().__init__(system_model, model_order_estimation=model_order_estimation,
+                         physical_array=physical_array, physical_gains=physical_gains)
         
         self.params = system_model.params
         self.N = N
         self.wavelength = self.params.wavelength
-        self.window_size = window_size # For now it is inserted directly
+        self.window_size = self.params.softmax_window_size
         
         # Initialize learnable parameters
         self._init_learnable_parameters()
@@ -82,9 +84,8 @@ class DiffMUSIC(SubspaceMethod):
         # Initialize complex gains - start with unit gains (real=1, imag=0)
         gains_real = torch.ones(self.N, dtype=torch.float64)
         gains_imag = torch.zeros(self.N, dtype=torch.float64)
-        self.gains_real = nn.Parameter(gains_real)
-        self.gains_imag = nn.Parameter(gains_imag)
-        self.complex_gain = torch.complex(gains_real, gains_imag, dtype=torch.complex64)
+        complex_gain = torch.complex(gains_real, gains_imag).to(torch.complex64)
+        self.complex_gain = nn.Parameter(complex_gain)
 
     def _init_angle_grid(self):
         """Initialize angle grid for DOA estimation"""
@@ -92,16 +93,47 @@ class DiffMUSIC(SubspaceMethod):
         angle_resolution = np.deg2rad(self.params.doa_resolution / 2) # Higher resolution by 2 than the original grid.
         angle_decimals = int(np.ceil(np.log10(1 / angle_resolution))) # Formula to determine floating point accuracy based on the resolution.
         
-        self.angles_dict = torch.arange(-angle_range, angle_range + angle_resolution, 
+        self.angles_grid = torch.arange(-angle_range, angle_range + angle_resolution, 
                                       angle_resolution, dtype=torch.float64)
-        self.angles_dict = torch.round(self.angles_dict, decimals=angle_decimals)
+        self.angles_grid = torch.round(self.angles_grid, decimals=angle_decimals)
+
+    def get_angles_grid(self) -> torch.Tensor:
+        """
+        Get the angle grid for DoA estimation
+        
+        Returns:
+            Tensor of angles in radians, shape (num_angles,)
+        """
+        return self.angles_grid.to(self.device)
 
     def _precompute_steering_grid(self):
         """Precompute steering vectors for the angular grid"""
         # This will be computed dynamically during forward pass since parameters are learnable
         pass
 
-
+    def get_array_learnable_parameters(self, learnable = True) -> tuple:
+        """
+        Get the learnable antenna positions and complex gains - if learnable return nn.Parameters, else return numpy arrays detached from the graph.
+        """
+        if learnable:
+            return self.antenna_positions, self.complex_gain
+        else:
+            return self.antenna_positions.detach().cpu().numpy(), self.complex_gain.detach().cpu().numpy()
+    
+    def set_window_size(self, window_size):
+        """
+        Dynamically update window size for diffMUSIC
+        
+        Args:
+            window_size: New window size (int for absolute, float 0-1 for relative)
+        """
+        if isinstance(window_size, float) and 0 < window_size < 1:
+            # Relative to grid size
+            self.window_size = int(window_size * len(self.angles_grid))
+        else:
+            # Absolute size
+            self.window_size = int(window_size)
+        
 
     def compute_steering_matrix(self, angles: torch.Tensor) -> torch.Tensor:
         """
@@ -117,13 +149,14 @@ class DiffMUSIC(SubspaceMethod):
             angles = angles.unsqueeze(0)
         
         # Get complex gains
-        complex_gains = self.complex_gain
+        antenna_positions, complex_gains = self.get_array_learnable_parameters(learnable=True)
+        complex_gains = complex_gains.to(torch.complex128)  # Ensure complex gains are in complex128 format
         
         # Compute steering vectors: a(θ) = g ⊙ exp(-j * 2π * p * sin(θ) / λ)
         # where ⊙ is element-wise multiplication
         
         # Phase computation: (N, 1) * (1, num_angles) -> (N, num_angles)
-        phase_delays = self.antenna_positions.unsqueeze(1) @ torch.sin(angles).unsqueeze(0)
+        phase_delays = antenna_positions.unsqueeze(1) @ torch.sin(angles).unsqueeze(0)
         
         # Steering matrix without gains
         steering_base = torch.exp(-2j * torch.pi * phase_delays / self.wavelength)
@@ -137,18 +170,14 @@ class DiffMUSIC(SubspaceMethod):
         
         return steering_matrix.to(torch.complex64)
     
-#TODO: Read up to the peak_finder inside the forward-pass. Looks fine, need to understand the peak_finder. 
-# If the hard decision is fine, we can use this also for MUSIC. Keep reading and notice the first dimension 
-# of cov is the batch_dim. Another thing is to change system_model_params to also include the training_params 
-# (all params in general). For now, the gains real and imag parts are parameters, change just 
-# the whole complex gain to be a parameter, and use it in the steering matrix. 
+#NOTE: from now on, the first dimension is always batch size, in our case it's dummy for compatibility. It'll be always 1.
 
     def forward(self, cov: torch.Tensor, number_of_sources: int, known_angles=None):
         """
         Forward pass of diffMUSIC
         
         Args:
-            cov: Covariance matrix of shape (BATCH_SIZE, N, N)
+            cov: Covariance matrix of shape (BATCH_SIZE, N, N). We leave the batch dimension although for now it's going to be dummy just for the sake of compatibility.
             number_of_sources: Number of sources to estimate, if None, will estimate the number of sources
             known_angles: Not used in far-field case (kept for compatibility)
             known_distances: Not used in far-field case (kept for compatibility)
@@ -168,9 +197,9 @@ class DiffMUSIC(SubspaceMethod):
         self.music_spectrum = 1 / (inverse_spectrum + 1e-10)
         
         # Peak finding (differentiable during training, hard during inference)
-        estimated_angles = self._peak_finder(number_of_sources)
+        estimated_angles, peaks_masks = self._peak_finder(number_of_sources)
         
-        return estimated_angles, source_estimation, eigen_regularization #eigen_regularization is not used in this implementation
+        return estimated_angles, peaks_masks, source_estimation, eigen_regularization #eigen_regularization is not used in this implementation
 
     def _compute_inverse_spectrum(self, noise_subspace: torch.Tensor) -> torch.Tensor:
         """
@@ -189,7 +218,7 @@ class DiffMUSIC(SubspaceMethod):
         # steering_grid: (N, num_angles), noise_subspace: (batch_size, N, N-M)
         var1 = torch.einsum("na, bnm -> bam", 
                            steering_grid.conj(), 
-                           noise_subspace)  # (batch_size, num_angles, N-M)
+                           noise_subspace.to(torch.complex64))
         # Computes the matrix multiplication using Einstein notation, just a fancier way to write it.
         
         inverse_spectrum = torch.norm(var1, dim=2) ** 2  # (batch_size, num_angles)
@@ -209,14 +238,15 @@ class DiffMUSIC(SubspaceMethod):
         if self.training: #This is built-in since it is a Module, just use model.train() or model.eval()
             return self._differentiable_peak_finder(number_of_sources)
         else:
-            return self._hard_peak_finder(number_of_sources)
+            return self._hard_peak_finder(number_of_sources, return_angles=True)
 
-    def _hard_peak_finder(self, number_of_sources: int) -> torch.Tensor:
+    def _hard_peak_finder(self, number_of_sources: int, return_angles = True) -> torch.Tensor:
         """
         Non-differentiable peak finding for inference
         
         Args:
             number_of_sources: Number of peaks to find
+            return_angles: Wheter to return angles or peaks_indices for DiffMUSIC's internal use
             
         Returns:
             Estimated angles in radians, shape (batch_size, number_of_sources)
@@ -231,7 +261,7 @@ class DiffMUSIC(SubspaceMethod):
             peaks_indices = sc.signal.find_peaks(spectrum, threshold=0.0)[0]
             
             if len(peaks_indices) < number_of_sources:
-                warnings.warn("diffMUSIC: Not enough peaks found, using highest values")
+                warnings.warn(f"diffMUSIC: Not enough peaks found, trying to find another {number_of_sources - len(peaks_indices)} peaks by top amplitude.")
                 # Use highest values instead
                 additional_peaks = torch.topk(torch.from_numpy(spectrum), 
                                             number_of_sources - len(peaks_indices), 
@@ -242,13 +272,17 @@ class DiffMUSIC(SubspaceMethod):
             sorted_peaks = peaks_indices[np.argsort(spectrum[peaks_indices])[::-1]]
             peaks[batch] = torch.from_numpy(sorted_peaks[:number_of_sources]).to(self.device)
         
-        # Convert indices to angles
-        estimated_angles = torch.gather(
-            self.angles_grid.unsqueeze(0).repeat(batch_size, 1).to(self.device), 
-            1, peaks
-        )
-        
-        return estimated_angles
+        if not return_angles:
+            # Return peak indices directly
+            return peaks
+        else:
+            # Convert indices to angles
+            estimated_angles = torch.gather(
+                self.angles_grid.unsqueeze(0).repeat(batch_size, 1).to(self.device), 
+                1, peaks
+            )
+            
+            return estimated_angles, None # Here for compatibility with the differentiable peak finder, we return None for peaks_masks.
 
     def _differentiable_peak_finder(self, number_of_sources: int) -> torch.Tensor:
         """
@@ -264,18 +298,23 @@ class DiffMUSIC(SubspaceMethod):
         estimated_angles = torch.zeros(batch_size, number_of_sources, 
                                      dtype=torch.float64, device=self.device)
         
+        peaks_indices = self._hard_peak_finder(number_of_sources, return_angles=False) # torch.Tensor of (batch_size, number_of_sources)
+        peaks_masks = [] # a list of lists, each containing indices of peaks for each batch, needed for the unsupervised loss.
+        
         for batch in range(batch_size):
+            batch_masks = []
             spectrum = self.music_spectrum[batch]
             
             # Find initial peaks (non-differentiable, but gradients will flow through softmax)
-            peaks_indices = self._find_initial_peaks(spectrum, number_of_sources)
+            peaks_indices_per_batch = peaks_indices[batch]
             
             # For each peak, apply differentiable refinement
             for source_idx in range(number_of_sources):
-                peak_idx = peaks_indices[source_idx]
+                peak_idx = peaks_indices_per_batch[source_idx]
                 
                 # Create angular mask around peak
                 mask_indices = self._create_angular_mask(peak_idx, spectrum.shape[0])
+                batch_masks.append(mask_indices)  # Store for unsupervised loss
                 
                 # Extract spectrum values in the mask
                 masked_spectrum = spectrum[mask_indices]
@@ -286,24 +325,11 @@ class DiffMUSIC(SubspaceMethod):
                 # Compute weighted average of angles (Equation 13 from paper)
                 masked_angles = self.angles_grid[mask_indices].to(self.device)
                 estimated_angles[batch, source_idx] = torch.sum(weights * masked_angles)
-        
-        return estimated_angles
 
-    def _find_initial_peaks(self, spectrum: torch.Tensor, number_of_sources: int) -> torch.Tensor:
-        """Find initial peak locations (non-differentiable but provides starting points)"""
-        spectrum_np = spectrum.cpu().detach().numpy()
-        peaks_indices = sc.signal.find_peaks(spectrum_np, threshold=0.0)[0]
+            peaks_masks.append(batch_masks)  # Store masks for unsupervised loss
         
-        if len(peaks_indices) < number_of_sources:
-            # Use highest values if not enough peaks
-            additional_peaks = torch.topk(spectrum, 
-                                        number_of_sources - len(peaks_indices), 
-                                        largest=True).indices.cpu().numpy()
-            peaks_indices = np.concatenate([peaks_indices, additional_peaks])
-        
-        # Sort by amplitude and take top peaks
-        sorted_peaks = peaks_indices[np.argsort(spectrum_np[peaks_indices])[::-1]]
-        return torch.from_numpy(sorted_peaks[:number_of_sources]).to(self.device)
+        return estimated_angles, peaks_masks
+
 
     def _create_angular_mask(self, center_idx: int, spectrum_length: int) -> torch.Tensor:
         """
@@ -326,19 +352,6 @@ class DiffMUSIC(SubspaceMethod):
         
         return mask_indices
 
-    def get_learned_parameters(self):
-        """
-        Get the learned array parameters
-        
-        Returns:
-            dict: Dictionary containing learned positions and gains
-        """
-        return {
-            'antenna_positions': self.antenna_positions.detach().cpu().numpy(),
-            'complex_gains': self.get_complex_gains().detach().cpu().numpy(),
-            'gains_magnitude': torch.abs(self.get_complex_gains()).detach().cpu().numpy(),
-            'gains_phase': torch.angle(self.get_complex_gains()).detach().cpu().numpy()
-        }
 
     def set_nominal_parameters(self, positions: torch.Tensor = None, gains: torch.Tensor = None):
         """
@@ -361,8 +374,8 @@ class DiffMUSIC(SubspaceMethod):
             self.gains_real.copy_(gains.real.to(torch.float64))
             self.gains_imag.copy_(gains.imag.to(torch.float64))
 
-    def plot_spectrum(self, batch_idx: int = 0, highlight_angles: torch.Tensor = None, 
-                     save: bool = False, title: str = "diffMUSIC Spectrum"):
+    def plot_spectrum(self, highlight_angles: torch.Tensor = None, 
+                     path_to_save: str | None = False, batch_idx: int = 0):
         """
         Plot the MUSIC spectrum
         
@@ -390,243 +403,52 @@ class DiffMUSIC(SubspaceMethod):
         
         plt.xlabel('Angle [degrees]')
         plt.ylabel('Spectrum Power')
-        plt.title(title)
+        plt.title(("diffMUSIC" if self.training else "MUSIC") + " Spectrum")
         plt.grid(True, alpha=0.3)
         plt.legend()
         plt.tight_layout()
         
-        if save:
-            plt.savefig('diffmusic_spectrum.pdf')
+        if path_to_save is not None:
+            plt.savefig(path_to_save / f"Spectrum.png", dpi=300)
         plt.show()
 
-    def plot_learned_array(self, save: bool = False):
-        """
-        Plot the learned antenna array geometry
-        
-        Args:
-            save: Whether to save the plot
-        """
-        learned_params = self.get_learned_parameters()
-        positions = learned_params['antenna_positions']
-        gains_mag = learned_params['gains_magnitude'] 
-        gains_phase = learned_params['gains_phase']
-        
-        # Nominal positions for comparison
-        nominal_positions = np.arange(self.N) * (self.wavelength / 2)
-        
-        fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(12, 10))
-        
-        # Plot 1: Antenna positions
-        ax1.scatter(nominal_positions, np.zeros_like(nominal_positions), 
-                   marker='o', s=100, alpha=0.5, label='Nominal', color='blue')
-        ax1.scatter(positions, np.zeros_like(positions), 
-                   marker='s', s=100, label='Learned', color='red')
-        ax1.set_xlabel('Position [wavelengths]')
-        ax1.set_title('Antenna Positions')
-        ax1.legend()
-        ax1.grid(True, alpha=0.3)
-        
-        # Plot 2: Gain magnitudes
-        antenna_indices = np.arange(self.N)
-        ax2.bar(antenna_indices - 0.2, np.ones(self.N), width=0.4, 
-               alpha=0.7, label='Nominal', color='blue')
-        ax2.bar(antenna_indices + 0.2, gains_mag, width=0.4, 
-               alpha=0.7, label='Learned', color='red')
-        ax2.set_xlabel('Antenna Index')
-        ax2.set_ylabel('Gain Magnitude')
-        ax2.set_title('Complex Gain Magnitudes')
-        ax2.legend()
-        ax2.grid(True, alpha=0.3)
-        
-        # Plot 3: Gain phases
-        ax3.bar(antenna_indices, gains_phase, width=0.6, alpha=0.7, color='green')
-        ax3.set_xlabel('Antenna Index')
-        ax3.set_ylabel('Gain Phase [radians]')
-        ax3.set_title('Complex Gain Phases')
-        ax3.grid(True, alpha=0.3)
-        
-        plt.tight_layout()
-        
-        if save:
-            plt.savefig('diffmusic_learned_array.pdf')
-        plt.show()
 
-    def test_step(self, batch, batch_idx, model: nn.Module = None):
+class DiffMUSICLoss(nn.Module):
+    """
+    Wrapper loss class for diffMUSIC training
+    Supports different loss strategies: RMSPE, spectrum, and unsupervised
+    """
+    
+    def __init__(self, loss_type: str = "rmspe", **kwargs):
         """
-        Test step compatible with the existing framework
-        
         Args:
-            batch: Test batch (x, sources_num, label)
-            batch_idx: Batch index
-            model: Model (not used, kept for compatibility)
-            
-        Returns:
-            tuple: (rmspe, accuracy, test_length)
+            loss_type: "rmspe" for LSL,θ, "spectrum" for LSL,P, or "unsupervised" for LUL
+            **kwargs: Additional arguments for specific loss functions
         """
-        x, sources_num, label = batch
-        if x.dim() == 2:
-            x = x.unsqueeze(0)
+        super(DiffMUSICLoss, self).__init__()
+        self.loss_type = loss_type
         
-        test_length = x.shape[0]
-        x = x.to(self.device)
-        angles = label.to(self.device)
+        # Import loss functions from metrics
+        from src.metrics import RMSPELoss, SpectrumLoss, UnsupervisedSpectrumLoss
         
-        # Check if sources number is consistent
-        if (sources_num != sources_num[0]).any():
-            raise Exception("diffMUSIC test_step: Inconsistent number of sources in batch")
-        
-        sources_num = sources_num[0]
-        
-        # Compute covariance
-        if self.system_model.params.signal_nature == "non-coherent":
-            Rx = self.pre_processing(x, mode="sample")
+        if loss_type == "rmspe":
+            self.loss_fn = RMSPELoss(**kwargs)
+        elif loss_type == "spectrum":
+            self.loss_fn = SpectrumLoss()
+        elif loss_type == "unsupervised":
+            self.loss_fn = UnsupervisedSpectrumLoss()
         else:
-            Rx = self.pre_processing(x, mode="sample")
-        
-        # Run diffMUSIC
-        predictions, sources_num_estimation, _ = self(Rx, number_of_sources=sources_num)
-        
-        # Compute RMSPE 
-        criterion = RMSPELoss(balance_factor=1.0)
-        rmspe = criterion(predictions, angles).sum().item()
-        
-        # Compute accuracy
-        acc = self.source_estimation_accuracy(sources_num, sources_num_estimation)
-        
-        return rmspe, acc, test_length
-
-    def __str__(self):
-        return "diffMUSIC"
-
-    def _get_name(self):
-        return "diffMUSIC"
-
-
-# class DiffMUSICLoss(nn.Module):
-#     """
-#     Loss functions for diffMUSIC training
-#     Implements both supervised learning strategies from the paper:
-#     - LSL,θ: RMSPE on estimated DoAs
-#     - LSL,P: Maximize spectrum amplitude at true DoA locations
-#     """
+            raise ValueError(f"Unknown loss type: {loss_type}")
     
-#     def __init__(self, loss_type: str = "rmspe"):
-#         """
-#         Args:
-#             loss_type: "rmspe" for LSL,θ or "spectrum" for LSL,P
-#         """
-#         super().__init__()
-#         self.loss_type = loss_type
-#         self.rmspe_loss = RMSPELoss(balance_factor=1.0)
-    
-#     def forward(self, predictions, targets, spectrum=None, angles_grid=None):
-#         """
-#         Compute loss based on specified type
-        
-#         Args:
-#             predictions: Predicted DoAs (for RMSPE loss)
-#             targets: True DoAs
-#             spectrum: MUSIC spectrum (for spectrum loss)
-#             angles_grid: Angular grid (for spectrum loss)
-            
-#         Returns:
-#             Loss value
-#         """
-#         if self.loss_type == "rmspe":
-#             return self.rmspe_loss(predictions, targets)
-        
-#         elif self.loss_type == "spectrum":
-#             if spectrum is None or angles_grid is None:
-#                 raise ValueError("Spectrum and angles_grid required for spectrum loss")
-            
-#             return self._spectrum_loss(targets, spectrum, angles_grid)
-        
-#         else:
-#             raise ValueError(f"Unknown loss type: {self.loss_type}")
-    
-#     def _spectrum_loss(self, true_angles, spectrum, angles_grid):
-#         """
-#         Spectrum-based loss (LSL,P from paper)
-#         Maximizes spectrum amplitude at true DoA locations
-#         """
-#         batch_size = spectrum.shape[0]
-#         total_loss = 0
-        
-#         for batch in range(batch_size):
-#             for angle in true_angles[batch]:
-#                 # Find closest angle in grid
-#                 angle_idx = torch.argmin(torch.abs(angles_grid - angle))
-#                 # Negative spectrum value (to maximize)
-#                 total_loss -= spectrum[batch, angle_idx]
-        
-#         return total_loss / (batch_size * true_angles.shape[1])
-
-
-# class UnsupervisedDiffMUSIC(DiffMUSIC):
-#     """
-#     Unsupervised diffMUSIC using Jain's Index (LUL from paper)
-#     Maximizes spectrum sharpness without requiring true DoA labels
-#     """
-    
-#     def __init__(self, *args, **kwargs):
-#         super().__init__(*args, **kwargs)
-#         self.jains_index_loss = JainsIndexLoss()
-    
-#     def compute_unsupervised_loss(self):
-#         """
-#         Compute unsupervised loss using Jain's Index on spectrum peaks
-        
-#         Returns:
-#             Loss value encouraging sharp peaks
-#         """
-#         if self.music_spectrum is None:
-#             raise ValueError("No spectrum computed. Run forward pass first.")
-        
-#         total_loss = 0
-#         batch_size = self.music_spectrum.shape[0]
-        
-#         for batch in range(batch_size):
-#             spectrum = self.music_spectrum[batch]
-            
-#             # Find initial peaks to create masks
-#             peaks_indices = self._find_initial_peaks(spectrum, self.system_model.params.M)
-            
-#             # Apply Jain's index to each peak region
-#             for peak_idx in peaks_indices:
-#                 mask_indices = self._create_angular_mask(peak_idx, spectrum.shape[0])
-#                 masked_spectrum = spectrum[mask_indices]
-                
-#                 # Jain's index encourages sharp peaks
-#                 jains_loss = self.jains_index_loss(masked_spectrum)
-#                 total_loss += jains_loss
-        
-#         return total_loss / batch_size
-
-
-# class JainsIndexLoss(nn.Module):
-#     """
-#     Jain's Index loss for unsupervised learning
-#     Encourages sharp, concentrated peaks in the spectrum
-#     """
-    
-#     def __init__(self):
-#         super().__init__()
-    
-#     def forward(self, x):
-#         """
-#         Compute Jain's Index: J(x) = (sum(x))^2 / (n * sum(x^2))
-        
-#         Args:
-#             x: Input tensor (spectrum values)
-            
-#         Returns:
-#             Jain's index value (higher = more concentrated)
-#         """
-#         n = x.shape[0]
-#         sum_x = torch.sum(x)
-#         sum_x_squared = torch.sum(x ** 2)
-        
-#         jains_index = (sum_x ** 2) / (n * sum_x_squared + 1e-8)
-        
-#         # Return negative to minimize (we want to maximize Jain's index)
-#         return -jains_index
+    def forward(self, **kwargs):
+        """
+        Forward pass - delegates to appropriate loss function
+        """
+        if self.loss_type == "rmspe":
+            return self.loss_fn(kwargs['predictions'], kwargs['targets'])
+        elif self.loss_type == "spectrum":
+            return self.loss_fn(kwargs['spectrum'], kwargs['targets'], kwargs['angles_grid'])
+        elif self.loss_type == "unsupervised":
+            return self.loss_fn(kwargs['spectrum'], kwargs['peak_masks'])
+        else:
+            raise ValueError(f"Unknown loss type: {self.loss_type}")
