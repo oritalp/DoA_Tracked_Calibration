@@ -10,5 +10,6 @@ wandb/
 *.png
 *.pdf
 *.out
-*.sh
+interactive.sh
+*.pth
 ./datasets/

@@ -30,15 +30,24 @@ from run_simulation import run_simulation
 import argparse
 import torch
 
-#TODO: check wandb (short single case)
-# run multiple window sizes cases.
-# pass over the running once again
-# defined missions for rearanging the results and where they are saved, split it into single_run_ressults and multi_run_results.
-# define graphs plotting class for the multi-case results.
+#TODO: 
+# 1. Right now, each experiment is saved alone (while optimizing the sotfmax window size).
+# we need to create also a multi-case scenario where we can test different cross products of parameters.
+# Something similiar to the old scenario_dict, but not necessirilly it. for the clearness of the code 
+# we might want to create a new class for this, including the plotting capabilities (next point)
 
-#NOTE: points for the future:
+# 2. based on the multi-case results, create functions plotting relevanmt graphs from the paper to
+# test our recreation. not such a big deal, please arrange it under one class.
+
+#NOTE:
+# points for the future:
+
 # 1. The unsupervised loss suffers from problems at the endfire due to smaller number of samples in the window.
 # We need to think about maybe mirroring at the edges or renormalizing the Jain's index somehow.
+
+# 2. The losses minimize thr rmspe, leading to higher DoA accuracy, but the actual configuration paraameters
+# diverge heavily. It'll be interesting to compare the learned steering matrix itself to the physical one although we will get
+# probably the same conclusion.
 
 # Initialization
 os.system("cls||clear")
@@ -94,7 +103,7 @@ model_config = \
     "softmax_window_size": 0.1,  # % of angle grid length
     
     # Case 3: Window size optimization (array/list of values)
-    # "softmax_window_size": np.arange(0.2, 0.4, 0.05),  # Relative sizes: [0.2, 0.25, 0.3, 0.35]
+    # "softmax_window_size": np.arange(0.01, 0.4, 0.01),  # Relative sizes: [0.2, 0.25, 0.3, 0.35]
     # "softmax_window_size": [15, 21, 27, 33],  # Absolute sizes
     # "softmax_window_size": [0.25, 21, 0.35, 27],  # Mixed relative and absolute
 }
@@ -234,8 +243,12 @@ if __name__ == "__main__":
             print(f"Estimated angles: {np.rad2deg(results['estimated_angles'])}")
         if 'final_train_loss' in results:
             print(f"Final training loss: {results['final_train_loss']:.6f}")  
-        if "learned_antenna_positions" in results and "learned_antenna_gains" in results:
+        if "learned_antenna_positions" in results.keys() and "learned_antennas_gains" in results.keys():
             if model_config["model_type"].lower() == "music":
-                print("These shoulf be the tandard one:")
-            print(f"Learned antenna positions: {results['learned_antenna_positions']}")
-            print(f"Learned antenna gains: {results['learned_antenna_gains']}")
+                print("These should be the tandard one:")
+            print(f"Learned antennas positions: {np.round(results['learned_antenna_positions'], 4)}")
+            print("Compared to the physical array positions:")
+            print(f"Physical antennas positions: {results['physical_array']}")
+            print(f"Learned antennas gains: {results['learned_antennas_gains']}")
+            print("Compared to the physical antennas gains:")
+            print(f"Physical antennas gains: {results['physical_antennas_gains']}")

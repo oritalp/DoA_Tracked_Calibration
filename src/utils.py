@@ -37,10 +37,10 @@ def plot_spectrums(angles_grid: torch.Tensor,
     plt.figure(figsize=(10, 6))
     for key, value in spectrums_dict.items():
         if not isinstance(value, torch.Tensor):
-            raise TypeError(f"plot_spectrums: Expected torch.Tensor, got {type(arg)}")
+            raise TypeError(f"plot_spectrums: Expected torch.Tensor, got {type(value)}")
         elif len(angles_grid) != len(value):
             raise ValueError(f"plot_spectrums: Length of angles_grid ({len(angles_grid)}) "
-                             f"does not match length of spectrum ({len(arg)}).")
+                             f"does not match length of spectrum ({len(value)}).")
         plt.plot(angles_deg, value.cpu().detach().numpy(), 'r--', linewidth=1, label= f"{key}")
     
     
@@ -102,7 +102,8 @@ def load_data_from_file(data_path: str):
         raise FileNotFoundError(f"load_data_from_file: No data found in {data_file}.")
     return data
 
-def initialize_paths(main_path: Path, system_model_params, dt_string_for_save: str) -> tuple:
+def initialize_paths(main_path: Path, system_model_params) -> tuple:
+    dt_string_for_save = system_model_params.dt_string_for_save
     indicating_str = (f"N:{system_model_params.N}_M:{system_model_params.M}_T:{system_model_params.T}_" + 
                       f"snr:{system_model_params.snr}_location_pert_boundary:{system_model_params.location_perturbation}_" +
                       f"gain_perturbation_var:{system_model_params.gain_perturbation_var}_" +

@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Dict, Any, Optional, Tuple
 from tqdm import tqdm
 from datetime import datetime
+import time
 
 from src.utils import sample_covariance
 
@@ -244,9 +245,9 @@ class DoARunner:
             
             # Create run name
             if trial_idx is not None:
-                run_name = f"trial_{trial_idx+1}_ws_{window_size}_{self.system_params.loss_type}"
+                run_name = f"trial_{trial_idx+1}_window_size_{window_size}_{self.system_params.loss_type}"
             else:
-                run_name = f"ws_{window_size}_{self.system_params.loss_type}"
+                run_name = f"winsow_size_{window_size}_{self.system_params.loss_type}"
             
             # Initialize wandb
             wandb.init(
@@ -305,9 +306,11 @@ class DoARunner:
             print("Running single configuration...")
             
         results = self._run_with_window_optimization(window_sizes, optimization_mode)
+        self.results = self.data_dict.copy()  # Copy to avoid modifying original
+        self.results.update(results)  # Update with results
         
-        self.results = results
-        return results
+
+        return self.results.copy()  # Return a copy to avoid external modifications
     
     def _create_fresh_algorithm(self, window_size):
         """
@@ -345,13 +348,13 @@ class DoARunner:
         Returns:
             Results from best configuration (or single configuration) plus stats
         """
-        import time
+
         
         best_rmspe = float('inf')
         best_results = None
         best_window_size = None
         
-        total_start_time = time.time()
+        
         trial_times = []
         
         for i, window_size in enumerate(window_sizes):
@@ -563,7 +566,7 @@ class DoARunner:
             'true_angles': true_angles.cpu().numpy(),
             'rmspe': rmspe.item(),
             "learned_antenna_positions": learned_antenna_positions,
-            "learned_coplex_gains": learned_coplex_gains,
+            "learned_antennas_gains": learned_coplex_gains,
             'music_spectrum': self.algorithm.music_spectrum.cpu().numpy() if self.algorithm.music_spectrum is not None else None,
             'angles_grid': self.algorithm.angles_grid.cpu().numpy() if hasattr(self.algorithm, 'angles_grid') else None
         }

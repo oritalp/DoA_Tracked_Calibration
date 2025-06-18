@@ -48,8 +48,7 @@ def __run_simulation(**kwargs):
     
     # Initialize paths
     #TODO: change the paths to be per model_connfig["model_type"]
-    data_saving_path, results_path = utils.initialize_paths(Path(__file__).parent, system_model_params,
-                                                            dt_string_for_save)
+    data_saving_path, results_path = utils.initialize_paths(Path(__file__).parent, system_model_params)
     data_loading_path = SIMULATION_COMMANDS["data_loading_path"] #ONLY USED if CREATE_DATA is False!
 
     # Prepare data dictionary
@@ -62,7 +61,6 @@ def __run_simulation(**kwargs):
         true_angles = signals_creator.get_labels()
         physical_array = signals_creator.get_array()
         physical_antennas_gains = signals_creator.get_antenna_gains()
-        antennas_gains_norm = torch.linalg.norm(physical_antennas_gains, ord=2, dim=0) #just for testing purposes
         
         # Pack data into dictionary
         data_dict = {
@@ -109,10 +107,10 @@ def __run_simulation(**kwargs):
     results_file = results_path / "results.pkl"
     utils.save_data_to_file(results_path, results, system_model_params)
     
-    # Save trained model if training was performed
-    if doa_runner._needs_training():
-        model_file = results_path / "trained_model.pth"
-        doa_runner.save_model(model_file)
+    # # Save trained model if training was performed
+    # if doa_runner._needs_training():
+    #     model_file = results_path / "trained_model.pth"
+    #     doa_runner.save_model(model_file)
     
     print(f"Results saved to: {results_path}")
     print(f"RMSPE: {results.get('rmspe', 'N/A'):.6f}")
