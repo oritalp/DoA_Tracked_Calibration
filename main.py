@@ -48,6 +48,7 @@ import torch
 # 2. The losses minimize thr rmspe, leading to higher DoA accuracy, but the actual configuration paraameters
 # diverge heavily. It'll be interesting to compare the learned steering matrix itself to the physical one although we will get
 # probably the same conclusion.
+# SUPER IMPORTANT IMPLICATION: If we don't really learn the rifht parameters, tracking with this garbage observations will not lead us far.
 
 # Initialization
 os.system("cls||clear")
