@@ -55,28 +55,46 @@ os.system("cls||clear")
 plt.close("all")
 
 scenario_dict = {
-# "SNR_sweep": {
-#         "parameter": "snr",
-#         "values": [-10, -5, 0, 5, 10, 15, 20, 25, 30],
-#         "fixed_params": {"T": 100},
-#         "plot_config": {
-#             "title": "RMSPE vs SNR (T=100)",
-#             "x_label": "SNR (dB)", 
-#             "y_label": "RMSPE (degrees)",
-#             "save_name": "rmspe_vs_snr"
-#         }
-#     },
-#     "T_sweep": {
-#         "parameter": "T", 
-#         "values": [10, 20, 30, 50, 70, 100, 150, 200],
-#         "fixed_params": {"snr": 30},
-#         "plot_config": {
-#             "title": "RMSPE vs T (SNR=30dB)",
-#             "x_label": "T (snapshots)",
-#             "y_label": "RMSPE (degrees)", 
-#             "save_name": "rmspe_vs_T"
-#         }
-#     }
+    # Example 1: Single loss function sweep (original behavior)
+    "SNR_sweep_rmspe": {
+        "parameter": "snr",
+        "values": [-10, -5, 0, 5, 10, 15, 20, 25, 30],
+        "fixed_params": {"T": 100},
+        "plot_config": {
+            "title": "RMSPE vs SNR (T=100, RMSPE Loss)",
+            "x_label": "SNR (dB)", 
+            "y_label": "RMSPE (degrees)",
+            "save_name": "rmspe_vs_snr_rmspe_loss"
+        }
+    },
+    
+    # Example 2: Multi-loss function sweep
+    "SNR_sweep_multi_loss": {
+        "parameter": "snr",
+        "values": [-5, 0, 5, 10, 15, 20, 25, 30],
+        "loss_functions": ["rmspe", "spectrum", "unsupervised"],  # This enables multi-loss mode
+        "fixed_params": {"T": 100},
+        "plot_config": {
+            "title": "RMSPE vs SNR (T=100) - Loss Function Comparison",
+            "x_label": "SNR (dB)", 
+            "y_label": "RMSPE (degrees)",
+            "save_name": "rmspe_vs_snr_multi_loss"
+        }
+    },
+    
+    # Example 3: T sweep with multi-loss
+    "T_sweep_multi_loss": {
+        "parameter": "T", 
+        "values": [20, 30, 50, 70, 100, 150, 200],
+        "loss_functions": ["rmspe", "spectrum", "unsupervised"],
+        "fixed_params": {"snr": 30},
+        "plot_config": {
+            "title": "RMSPE vs T (SNR=30dB) - Loss Function Comparison",
+            "x_label": "T (snapshots)",
+            "y_label": "RMSPE (degrees)", 
+            "save_name": "rmspe_vs_T_multi_loss"
+        }
+    }     
 }
 
 simulation_commands = {
