@@ -55,10 +55,28 @@ os.system("cls||clear")
 plt.close("all")
 
 scenario_dict = {
-    # "SNR": [-10, -5, 0, 5, 10],
-    # "T": [10, 20, 30, 50, 70, 100],
-    # "eta": [0.0, 0.01, 0.02, 0.03, 0.04],
-    # "M": [2, 3, 4, 5, 6, 7],
+# "SNR_sweep": {
+#         "parameter": "snr",
+#         "values": [-10, -5, 0, 5, 10, 15, 20, 25, 30],
+#         "fixed_params": {"T": 100},
+#         "plot_config": {
+#             "title": "RMSPE vs SNR (T=100)",
+#             "x_label": "SNR (dB)", 
+#             "y_label": "RMSPE (degrees)",
+#             "save_name": "rmspe_vs_snr"
+#         }
+#     },
+#     "T_sweep": {
+#         "parameter": "T", 
+#         "values": [10, 20, 30, 50, 70, 100, 150, 200],
+#         "fixed_params": {"snr": 30},
+#         "plot_config": {
+#             "title": "RMSPE vs T (SNR=30dB)",
+#             "x_label": "T (snapshots)",
+#             "y_label": "RMSPE (degrees)", 
+#             "save_name": "rmspe_vs_T"
+#         }
+#     }
 }
 
 simulation_commands = {

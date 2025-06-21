@@ -20,7 +20,7 @@ import numpy as np
 from doa_runner import DoARunner
 
 
-def __run_simulation(**kwargs):
+def run_single_simulation(**kwargs):
     SIMULATION_COMMANDS = kwargs["simulation_commands"]
     SYSTEM_MODEL_PARAMS = kwargs["system_model_params"]
     MODEL_CONFIG = kwargs["model_config"]
@@ -117,6 +117,45 @@ def __run_simulation(**kwargs):
     
     return results
 
+def __run_parameter_sweeps(**kwargs):
+    """
+    Run parameter sweeps based on scenario_dict configuration
+    
+    Args:
+        **kwargs: Contains scenario_dict and other configuration
+        
+    Returns:
+        Dictionary with results from all sweeps
+    """
+    from src.multi_experiment_runner import MultiExperimentRunner
+    
+    scenario_dict = kwargs["scenario_dict"]
+    all_sweep_results = {}
+    
+    print(f"Starting parameter sweeps for {len(scenario_dict)} configurations...")
+    
+    for sweep_name, sweep_config in scenario_dict.items():
+        print(f"\n{'='*60}")
+        print(f"Running sweep: {sweep_name}")
+        print(f"{'='*60}")
+        
+        try:
+            # Create and run sweep
+            runner = MultiExperimentRunner(sweep_config, kwargs)
+            sweep_results = runner.run_sweep()
+            all_sweep_results[sweep_name] = sweep_results
+            
+            print(f"Sweep '{sweep_name}' completed successfully")
+            print(f"Mean RMSPE: {sweep_results['aggregated_metrics']['mean_rmspe']:.6f}")
+            
+        except Exception as e:
+            print(f"Error in sweep '{sweep_name}': {e}")
+            all_sweep_results[sweep_name] = {'error': str(e)}
+    
+    print(f"\nAll parameter sweeps completed!")
+    return all_sweep_results
+
+
 
 def run_simulation(**kwargs):
     """
@@ -129,60 +168,14 @@ def run_simulation(**kwargs):
     - M: a list of number of sources to be tested
     """
     #TODO: check if anything is missing for the scenario_dict option once needed.
-    if kwargs["scenario_dict"] == {}:
-        results = __run_simulation(**kwargs)
-        return results
-    
-    # from this on the option of multiple scenarios is used. this is activated when we specify the sceario_dict
-    # in main.py 
-    # TODO: Later adjust it to our way.
+    scenario_dict = kwargs["scenario_dict"]
+        
+    if not scenario_dict:  # Single experiment (current behavior)
+        return run_single_simulation(**kwargs)
+    else:  # Multi-experiment sweep
+        return __run_parameter_sweeps(**kwargs)
 
-    # loss_dict = {}
-    # default_snr = kwargs["system_model_params"]["snr"]
-    # default_T = kwargs["system_model_params"]["T"]
-    # default_eta = kwargs["system_model_params"]["eta"]
-    # default_m = kwargs["system_model_params"]["M"]
-    # for key, value in kwargs["scenario_dict"].items():
-    #     if key == "SNR":
-    #         loss_dict["SNR"] = {snr: None for snr in value}
-    #         print(f"Testing SNR values: {value}")
-    #         for snr in value:
-    #             kwargs["system_model_params"]["snr"] = snr
-    #             loss = __run_simulation(**kwargs)
-    #             loss_dict["SNR"][snr] = loss
-    #             kwargs["system_model_params"]["snr"] = default_snr
-    #     if key == "T":
-    #         loss_dict["T"] = {T: None for T in value}
-    #         print(f"Testing T values: {value}")
-    #         for T in value:
-    #             kwargs["system_model_params"]["T"] = T
-    #             loss = __run_simulation(**kwargs)
-    #             loss_dict["T"][T] = loss
-    #             kwargs["system_model_params"]["T"] = default_T
-    #     if key == "eta":
-    #         loss_dict["eta"] = {eta: None for eta in value}
-    #         print(f"Testing eta values: {value}")
-    #         for eta in value:
-    #             kwargs["system_model_params"]["eta"] = eta
-    #             loss = __run_simulation(**kwargs)
-    #             loss_dict["eta"][eta] = loss
-    #             kwargs["system_model_params"]["eta"] = default_eta
-    #     if key == "M":
-    #         loss_dict["M"] = {m: None for m in value}
-    #         print(f"Testing M values: {value}")
-    #         for m in value:
-    #             kwargs["system_model_params"]["M"] = m
-    #             loss = __run_simulation(**kwargs)
-    #             loss_dict["M"][m] = loss
-    #             kwargs["system_model_params"]["M"] = default_m
-    # if None not in list(next(iter(loss_dict.values())).values()):
-    #     print_loss_results_from_simulation(loss_dict)
-    #     if kwargs["simulation_commands"]["PLOT_LOSS_RESULTS"]:
-    #         plot_results(loss_dict, kwargs["system_model_params"]["field_type"],
-    #                      plot_acc=kwargs["simulation_commands"]["PLOT_ACC_RESULTS"],
-    #                      save_to_file=kwargs["simulation_commands"]["SAVE_PLOTS"])
 
-    # return loss_dict
 
 
 if __name__ == "__main__":

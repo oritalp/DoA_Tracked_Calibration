@@ -190,3 +190,14 @@ def set_unified_seed(seed: int = 42):
         torch.use_deterministic_algorithms(True)
 
 
+def save_pickle(data, filepath):
+    """Save data to pickle file"""
+    with open(filepath, 'wb') as f:
+        pickle.dump(data, f)
+
+
+def load_pickle(filepath):
+    """Load data from pickle file"""
+    with open(filepath, 'rb') as f:
+        return pickle.load(f)
+
