@@ -13,6 +13,7 @@ from typing import Dict, Any, Optional, Tuple
 from tqdm import tqdm
 from datetime import datetime
 import time
+from typing import Dict, Any, Optional, Tuple, List
 
 from src.utils import sample_covariance
 
@@ -630,3 +631,421 @@ class DoARunner:
                 title=title
             )
         return None
+    
+
+    def run_multi_loss_spectrum_comparison(self, loss_functions: List[str]) -> Dict[str, Any]:
+        """
+        Run the same experiment with multiple loss functions and collect spectra for comparison
+        
+        Args:
+            loss_functions: List of loss functions to compare (e.g., ['rmspe', 'spectrum', 'unsupervised'])
+            
+        Returns:
+            Dictionary containing spectra and results for each loss function
+        """
+        print(f"Starting multi-loss spectrum comparison with {len(loss_functions)} loss functions...")
+        print(f"Loss functions: {loss_functions}")
+        
+        # Initialize results storage
+        spectra_results = {}
+        full_results = {}
+        execution_times = {}
+        
+        # Get window size for consistent comparison
+        window_size = getattr(self.system_params, 'softmax_window_size', 21)
+        if hasattr(window_size, '__len__'):
+            # If multiple window sizes, use the first one for comparison
+            window_size = window_size[0] if len(window_size) > 0 else 21
+        
+        # Run experiment for each loss function
+        for i, loss_function in enumerate(loss_functions):
+            print(f"\n{'='*50}")
+            print(f"Running with Loss Function: {loss_function} ({i+1}/{len(loss_functions)})")
+            print(f"{'='*50}")
+            
+            start_time = time.time()
+            
+            try:
+                # Create fresh algorithm instance with reset parameters
+                self.algorithm = self._create_fresh_algorithm(window_size)
+                
+                # Update system params for this loss function
+                original_loss_type = getattr(self.system_params, 'loss_type', None)
+                self.system_params.loss_type = loss_function
+                
+                # Setup fresh training components
+                if self._needs_training():
+                    self._setup_training()
+                    self._setup_wandb(window_size, trial_idx=i)
+                
+                # Run complete training + evaluation cycle
+                results = {}
+                if self._needs_training():
+                    train_results = self._run_training()
+                    results.update(train_results)
+                
+                eval_results = self._run_evaluation()
+                results.update(eval_results)
+                
+                # Store spectrum with proper dimension handling
+                spectrum = results.get('music_spectrum', None)
+                if spectrum is not None:
+                    # Ensure consistent storage format (remove batch dimension)
+                    if isinstance(spectrum, torch.Tensor):
+                        spectrum = spectrum.cpu().numpy()
+                    if spectrum.ndim == 2 and spectrum.shape[0] == 1:
+                        spectrum = spectrum.squeeze(0)  # Remove batch dimension
+                    elif spectrum.ndim == 2 and spectrum.shape[0] > 1:
+                        spectrum = spectrum[0]  # Take first batch element
+                    
+                    spectra_results[loss_function] = spectrum
+                else:
+                    spectra_results[loss_function] = None
+                
+                full_results[loss_function] = results
+                execution_times[loss_function] = time.time() - start_time
+                
+                print(f"  RMSPE: {results['rmspe']:.6f} (Time: {execution_times[loss_function]:.2f}s)")
+                
+                # Close wandb for this trial
+                self._close_wandb()
+                
+                # Restore original loss type
+                if original_loss_type is not None:
+                    self.system_params.loss_type = original_loss_type
+                    
+            except Exception as e:
+                print(f"  Error with {loss_function}: {e}")
+                import traceback
+                traceback.print_exc()  # Print full traceback for debugging
+                
+                # Store error results
+                spectra_results[loss_function] = None
+                full_results[loss_function] = {'error': str(e), 'rmspe': float('inf')}
+                execution_times[loss_function] = time.time() - start_time
+        
+        # Compile consolidated results
+        total_time = sum(execution_times.values())
+        consolidated_results = {
+            'comparison_type': 'multi_loss_spectrum',
+            'loss_functions': loss_functions,
+            'window_size_used': window_size,
+            'spectra': spectra_results,
+            'results': full_results,
+            'execution_times': execution_times,
+            'total_execution_time': total_time,
+            'shared_data': {
+                'angles_grid': self.algorithm.angles_grid.cpu().numpy() if hasattr(self.algorithm, 'angles_grid') else None,
+                'true_angles': self.data_dict['true_angles'].cpu().numpy() if isinstance(self.data_dict['true_angles'], torch.Tensor) else self.data_dict['true_angles'],
+                'system_params': self.system_params
+            }
+        }
+        
+        print(f"\nMulti-loss spectrum comparison completed in {total_time:.2f}s")
+        
+        # Store results for potential later use
+        self.multi_loss_results = consolidated_results
+        
+        return consolidated_results
+        
+    def plot_multi_loss_spectrum_comparison(self, multi_loss_results: Dict[str, Any], path: Path):
+        """
+        Plot spectra from multiple loss functions on the same figure
+        
+        Args:
+            multi_loss_results: Results from run_multi_loss_spectrum_comparison()
+            path: Path to save the plot
+        """
+        import matplotlib.pyplot as plt
+        import numpy as np
+        
+        if multi_loss_results is None:
+            raise ValueError("No multi-loss results available. Run run_multi_loss_spectrum_comparison() first.")
+        
+        # Extract data
+        loss_functions = multi_loss_results['loss_functions']
+        spectra = multi_loss_results['spectra']
+        results = multi_loss_results['results']
+        shared_data = multi_loss_results['shared_data']
+        
+        angles_grid = shared_data['angles_grid']
+        true_angles = shared_data['true_angles']
+        
+        if angles_grid is None:
+            print("Warning: No angles grid available for plotting")
+            return
+        
+        # Convert angles to degrees for plotting
+        angles_deg = np.rad2deg(angles_grid)
+        true_angles_deg = np.rad2deg(true_angles)
+        
+        # Create figure
+        plt.figure(figsize=(14, 8))
+        
+        # Define colors and line styles for different loss functions
+        colors = {'rmspe': 'blue', 'spectrum': 'red', 'unsupervised': 'green'}
+        line_styles = {'rmspe': '-', 'spectrum': '--', 'unsupervised': '-.'}
+        default_colors = ['blue', 'red', 'green', 'orange', 'purple', 'brown']
+        default_styles = ['-', '--', '-.', ':', '-', '--']
+        
+        # Plot spectrum for each loss function
+        for i, loss_function in enumerate(loss_functions):
+            spectrum = spectra.get(loss_function, None)
+            result = results.get(loss_function, {})
+            
+            if spectrum is not None and 'error' not in result:
+                # Handle spectrum dimensions - remove batch dimension if present
+                if isinstance(spectrum, np.ndarray):
+                    if spectrum.ndim == 2 and spectrum.shape[0] == 1:
+                        spectrum = spectrum.squeeze(0)  # Remove batch dimension (1, 481) -> (481,)
+                    elif spectrum.ndim == 2 and spectrum.shape[0] > 1:
+                        spectrum = spectrum[0]  # Take first batch element
+                elif isinstance(spectrum, torch.Tensor):
+                    spectrum = spectrum.cpu().numpy()
+                    if spectrum.ndim == 2 and spectrum.shape[0] == 1:
+                        spectrum = spectrum.squeeze(0)
+                    elif spectrum.ndim == 2 and spectrum.shape[0] > 1:
+                        spectrum = spectrum[0]
+                
+                # Ensure spectrum is 1D
+                if spectrum.ndim != 1:
+                    print(f"Warning: Unexpected spectrum shape for {loss_function}: {spectrum.shape}")
+                    continue
+                    
+                # Ensure angles_deg and spectrum have the same length
+                if len(angles_deg) != len(spectrum):
+                    print(f"Warning: Length mismatch for {loss_function}: angles={len(angles_deg)}, spectrum={len(spectrum)}")
+                    continue
+                
+                # Get color and style
+                color = colors.get(loss_function, default_colors[i % len(default_colors)])
+                style = line_styles.get(loss_function, default_styles[i % len(default_styles)])
+                
+                # Get RMSPE for label
+                rmspe = result.get('rmspe', float('inf'))
+                
+                # Plot spectrum
+                plt.plot(angles_deg, spectrum, 
+                        color=color, linestyle=style, linewidth=2,
+                        label=f'{loss_function.upper()} (RMSPE: {rmspe:.3f}°)')
+            else:
+                print(f"Warning: No valid spectrum for {loss_function}")
+        
+        # Add true angle markers
+        for i, true_angle in enumerate(true_angles_deg):
+            plt.axvline(x=true_angle, color='black', linestyle=':', alpha=0.7, 
+                    label='True DoA' if i == 0 else "")
+        
+        # Customize plot
+        plt.xlabel('Angle [degrees]', fontsize=12, fontweight='bold')
+        plt.ylabel('Spectrum Power', fontsize=12, fontweight='bold')
+        plt.title('Multi-Loss Function Spectrum Comparison', fontsize=14, fontweight='bold')
+        plt.grid(True, alpha=0.3)
+        plt.legend(fontsize=10)
+        
+        # Add system info as text
+        info_text = (f"N={shared_data['system_params'].N}, "
+                    f"M={shared_data['system_params'].M}, "
+                    f"T={shared_data['system_params'].T}, "
+                    f"SNR={shared_data['system_params'].snr}dB")
+        plt.text(0.02, 0.98, info_text, transform=plt.gca().transAxes, 
+                verticalalignment='top', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+        
+        plt.tight_layout()
+        
+        # Save plot
+        save_path = path / "multi_loss_spectrum_comparison.png"
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        plt.savefig(path / "multi_loss_spectrum_comparison.pdf", bbox_inches='tight')
+        
+        print(f"Multi-loss spectrum comparison plot saved to: {save_path}")
+        plt.show()
+        
+
+    def plot_multi_loss_learned_parameters(self, multi_loss_results: Dict[str, Any], path: Path):
+        """
+        Plot learned parameters from multiple loss functions on the same figure
+        
+        Args:
+            multi_loss_results: Results from run_multi_loss_spectrum_comparison()
+            path: Path to save the plot
+        """
+        import matplotlib.pyplot as plt
+        import matplotlib.patches as patches
+        import numpy as np
+        
+        if multi_loss_results is None:
+            raise ValueError("No multi-loss results available. Run run_multi_loss_spectrum_comparison() first.")
+        
+        # Extract data
+        loss_functions = multi_loss_results['loss_functions']
+        results = multi_loss_results['results']
+        shared_data = multi_loss_results['shared_data']
+        
+        # Get physical parameters for comparison
+        true_positions = self.data_dict.get('physical_array', None)
+        true_gains = self.data_dict.get('physical_antennas_gains', None)
+        
+        # Convert to numpy if they're torch tensors
+        if true_positions is not None and isinstance(true_positions, torch.Tensor):
+            true_positions = true_positions.cpu().numpy()
+        if true_gains is not None and isinstance(true_gains, torch.Tensor):
+            true_gains = true_gains.cpu().numpy()
+        
+        # Create figure with appropriate height for all rows
+        num_loss_functions = len([lf for lf in loss_functions if 'error' not in results.get(lf, {})])
+        total_rows = num_loss_functions + (1 if true_positions is not None else 0)
+        fig, ax = plt.subplots(1, 1, figsize=(16, 3 + total_rows * 1.5))
+        
+        # Define colors for different loss functions
+        colors = {'rmspe': 'blue', 'spectrum': 'red', 'unsupervised': 'green'}
+        default_colors = ['blue', 'red', 'green', 'orange', 'purple', 'brown']
+        
+        # Y positions for different rows
+        row_spacing = 1.5
+        current_y = (total_rows - 1) * row_spacing / 2
+        
+        # Plot learned parameters for each loss function
+        plotted_loss_functions = []
+        for i, loss_function in enumerate(loss_functions):
+            result = results.get(loss_function, {})
+            
+            if 'error' in result:
+                print(f"Skipping {loss_function} due to error: {result['error']}")
+                continue
+            
+            learned_positions = result.get('learned_antenna_positions', None)
+            learned_gains = result.get('learned_antennas_gains', None)
+            rmspe = result.get('rmspe', float('inf'))
+            
+            if learned_positions is None or learned_gains is None:
+                print(f"Warning: No learned parameters for {loss_function}")
+                continue
+            
+            # Convert positions to wavelength units for display
+            wavelength = shared_data['system_params'].wavelength
+            learned_positions_wl = learned_positions / (wavelength / 2)
+            
+            # Get color for this loss function
+            color = colors.get(loss_function, default_colors[i % len(default_colors)])
+            
+            # Plot learned parameters
+            for j, (pos, gain) in enumerate(zip(learned_positions_wl, learned_gains)):
+                # Circle radius represents gain magnitude
+                radius = abs(gain) * 0.2  # Smaller radius for multiple rows
+                
+                # Circle color and segment angle represent gain phase
+                phase = np.angle(gain)
+                
+                # Draw circle with color corresponding to loss function
+                circle = patches.Circle((pos, current_y), radius, 
+                                        facecolor=color, alpha=0.3,
+                                        edgecolor=color, 
+                                        linewidth=2,
+                                        label=f'{loss_function.upper()} (RMSPE: {rmspe:.3f}°)' if j == 0 else "")
+                ax.add_patch(circle)
+                
+                # Draw phase segment (line from center to edge)
+                segment_x = pos + radius * np.cos(phase)
+                segment_y = current_y + radius * np.sin(phase)
+                ax.plot([pos, segment_x], [current_y, segment_y], color=color, linewidth=2)
+                
+                # Add antenna number
+                if j == 0:  # Only add for first antenna to avoid clutter
+                    ax.text(pos - 0.3, current_y, f'{loss_function.upper()}', 
+                        ha='right', va='center', fontsize=10, fontweight='bold', color=color)
+            
+            # Add horizontal reference line
+            ax.axhline(y=current_y, color=color, linestyle=':', alpha=0.3, linewidth=1)
+            
+            plotted_loss_functions.append(loss_function)
+            current_y -= row_spacing
+        
+        # Plot physical parameters if available (bottom row)
+        if true_positions is not None and true_gains is not None:
+            true_positions_wl = true_positions / (wavelength / 2)
+            
+            for j, (pos, gain) in enumerate(zip(true_positions_wl, true_gains)):
+                radius = abs(gain) * 0.2
+                phase = np.angle(gain)
+                
+                # Draw circle with different style for physical parameters
+                circle = patches.Circle((pos, current_y), radius, 
+                                        facecolor='lightgray', 
+                                        edgecolor='black', 
+                                        linewidth=2, 
+                                        alpha=0.7,
+                                        label='Physical' if j == 0 else "")
+                ax.add_patch(circle)
+                
+                # Draw phase segment
+                segment_x = pos + radius * np.cos(phase)
+                segment_y = current_y + radius * np.sin(phase)
+                ax.plot([pos, segment_x], [current_y, segment_y], 'k-', linewidth=2)
+            
+            # Add label for physical parameters
+            ax.text(true_positions_wl[0] - 0.3, current_y, 'PHYSICAL', 
+                ha='right', va='center', fontsize=10, fontweight='bold', color='black')
+            
+            # Add horizontal reference line
+            ax.axhline(y=current_y, color='black', linestyle=':', alpha=0.3, linewidth=1)
+        
+        # Set axis limits and labels
+        all_positions = []
+        for loss_function in plotted_loss_functions:
+            result = results.get(loss_function, {})
+            if 'learned_antenna_positions' in result:
+                positions_wl = result['learned_antenna_positions'] / (wavelength / 2)
+                all_positions.extend(positions_wl)
+        
+        if true_positions is not None:
+            all_positions.extend(true_positions_wl)
+        
+        if all_positions:
+            ax.set_xlim(min(all_positions) - 0.5, max(all_positions) + 0.5)
+        
+        y_range = total_rows * row_spacing / 2 + 0.8
+        ax.set_ylim(-y_range, y_range)
+        ax.set_xlabel('x [λ/2]', fontsize=12, fontweight='bold')
+        ax.set_ylabel('')
+        
+        # Create title with summary
+        rmspe_summary = ', '.join([f"{lf.upper()}: {results[lf]['rmspe']:.3f}°" 
+                                for lf in plotted_loss_functions])
+        title = f'Multi-Loss Learned Parameters Comparison\n{rmspe_summary}'
+        ax.set_title(title, fontsize=14, fontweight='bold')
+        
+        ax.grid(True, alpha=0.3)
+        
+        # Create custom legend
+        legend_elements = []
+        for i, loss_function in enumerate(plotted_loss_functions):
+            color = colors.get(loss_function, default_colors[i % len(default_colors)])
+            rmspe = results[loss_function]['rmspe']
+            legend_elements.append(
+                plt.Line2D([0], [0], marker='o', color='w', markerfacecolor=color, 
+                        markersize=10, markeredgecolor=color, markeredgewidth=2, 
+                        alpha=0.7, label=f'{loss_function.upper()} (RMSPE: {rmspe:.3f}°)')
+            )
+        
+        if true_positions is not None:
+            legend_elements.append(
+                plt.Line2D([0], [0], marker='o', color='w', markerfacecolor='lightgray', 
+                        markersize=10, markeredgecolor='black', markeredgewidth=2, 
+                        alpha=0.7, label='Physical')
+            )
+        
+        ax.legend(handles=legend_elements, loc='upper right', fontsize=10)
+        
+        # Remove y-axis ticks for cleaner look
+        ax.set_yticks([])
+        
+        plt.tight_layout()
+        
+        # Save plot
+        save_path = path / "multi_loss_learned_parameters.png"
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        plt.savefig(path / "multi_loss_learned_parameters.pdf", bbox_inches='tight')
+        
+        print(f"Multi-loss learned parameters plot saved to: {save_path}")
+        plt.show()

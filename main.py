@@ -82,25 +82,27 @@ scenario_dict = {
     #     }
     # },
     
-    # # Example 3: T sweep with multi-loss
-    # "T_sweep_multi_loss": {
-    #     "parameter": "T", 
-    #     "values": [20, 30, 50, 70, 100, 150, 200],
-    #     "loss_functions": ["rmspe", "spectrum", "unsupervised"],
-    #     "fixed_params": {"snr": 30},
-    #     "plot_config": {
-    #         "title": "RMSPE vs T (SNR=30dB) - Loss Function Comparison",
-    #         "x_label": "T (snapshots)",
-    #         "y_label": "RMSPE (degrees)", 
-    #         "save_name": "rmspe_vs_T_multi_loss"
-    #     }
-    # }     
+    # Example 3: T sweep with multi-loss
+    "T_sweep_multi_loss": {
+        "parameter": "T", 
+        "values": [20, 30, 50, 70, 100, 150, 200],
+        "loss_functions": ["rmspe", "spectrum", "unsupervised"],
+        "fixed_params": {"snr": 30},
+        "plot_config": {
+            "title": "RMSPE vs T (SNR=30dB) - Loss Function Comparison",
+            "x_label": "T (snapshots)",
+            "y_label": "RMSPE (degrees)", 
+            "save_name": "rmspe_vs_T_multi_loss"
+        }
+    }     
 }
 
 simulation_commands = {
     "create_data": True,
     "save_data": False,  # Save data after creation
-    "plot_results": True,  # Plot data after creation
+    "plot_results": False,  # Plot data after creation
+    "multi_loss_comparison": False,  # Enable multi-loss spectrum and learned parameters comparison
+    "spectrum_loss_functions": ["rmspe", "spectrum", "unsupervised"],  # Loss functions to compare
     "data_loading_path": "datasets/N:16_M:5_T:100_snr:10_location_pert_boundary:0.25_gain_perturbation_var:0.36_seed:42/03_06_2025_15_06/data.pkl"
     # This is the path to the data file, ONLY USED if CREATE_DATA is False!
     # By now, this gets set manually.
@@ -272,7 +274,11 @@ if __name__ == "__main__":
     print("Total time: ", time.time() - start)
     
     # Print final results summary
-    if isinstance(results, dict) and 'rmspe' in results:
+    if simulation_commands.get("multi_loss_spectrum_comparison", False):
+        print(f"\nMulti-Loss Spectrum Comparison Completed!")
+        print(f"Loss functions compared: {simulation_commands['spectrum_loss_functions']}")
+        print(f"Results saved and plots generated.")
+    elif  isinstance(results, dict) and 'rmspe' in results:
         print(f"\nFinal Results:")
         print(f"RMSPE: {results['rmspe']:.6f} degrees")
         if 'estimated_angles' in results and 'true_angles' in results:
