@@ -148,6 +148,9 @@ class DiffMUSIC(SubspaceMethod):
         if angles.dim() == 0:
             angles = angles.unsqueeze(0)
         
+        # Ensure angles have the same dtype as antenna_positions (float64)
+        angles = angles.to(torch.float64)
+        
         # Get complex gains
         antenna_positions, complex_gains = self.get_array_learnable_parameters(learnable=True)
         complex_gains = complex_gains.to(torch.complex128)  # Ensure complex gains are in complex128 format

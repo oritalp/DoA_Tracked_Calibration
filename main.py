@@ -54,7 +54,7 @@ import torch
 os.system("cls||clear")
 plt.close("all")
 
-scenario_dict = {
+scenario_dict = { # Fill in to do multiple experiments 
     # # Example 1: Single loss function sweep (original behavior)
     # "SNR_sweep_rmspe": {
     #     "parameter": "snr",
@@ -100,8 +100,8 @@ scenario_dict = {
 simulation_commands = {
     "create_data": True,
     "save_data": False,  # Save data after creation
-    "plot_results": False,  # Plot data after creation
-    "multi_loss_comparison": False,  # Enable multi-loss spectrum and learned parameters comparison
+    "plot_results": True,  # Plot data after creation
+    "multi_loss_comparison": False,  # Enable multi-loss spectrum and learned parameters comparison, if multiple experiments then need to be False
     "spectrum_loss_functions": ["rmspe", "spectrum", "unsupervised"],  # Loss functions to compare
     "data_loading_path": "datasets/N:16_M:5_T:100_snr:10_location_pert_boundary:0.25_gain_perturbation_var:0.36_seed:42/03_06_2025_15_06/data.pkl"
     # This is the path to the data file, ONLY USED if CREATE_DATA is False!
@@ -281,6 +281,8 @@ if __name__ == "__main__":
     elif  isinstance(results, dict) and 'rmspe' in results:
         print(f"\nFinal Results:")
         print(f"RMSPE: {results['rmspe']:.6f} degrees")
+        if 'steering_matrix_mse' in results:
+            print(f"Steering Matrix MSE: {results['steering_matrix_mse']:.6f}")  # Add this line
         if 'estimated_angles' in results and 'true_angles' in results:
             print(f"True angles: {np.rad2deg(results['true_angles'])}")
             print(f"Estimated angles: {np.rad2deg(results['estimated_angles'])}")

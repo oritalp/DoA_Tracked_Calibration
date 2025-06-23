@@ -114,7 +114,6 @@ def run_single_simulation(**kwargs):
     
     print(f"Results saved to: {results_path}")
     print(f"RMSPE: {results.get('rmspe', 'N/A'):.6f}")
-    
     return results
 
 def __run_parameter_sweeps(**kwargs):
@@ -278,7 +277,8 @@ def run_multi_loss_comparison(**kwargs):
         result = multi_loss_results['results'].get(loss_func, {})
         if 'error' not in result:
             rmspe = result.get('rmspe', float('inf'))
-            print(f"{loss_func.upper()}: RMSPE = {rmspe:.6f}°")
+            steering_mse = result.get('steering_matrix_mse', float('nan'))
+            print(f"{loss_func.upper()}: RMSPE = {rmspe:.6f}°, Steering MSE = {steering_mse:.6f}")
         else:
             print(f"{loss_func.upper()}: ERROR - {result.get('error', 'Unknown error')}")
     

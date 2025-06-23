@@ -554,6 +554,8 @@ class DoARunner:
 
             learned_antenna_positions, learned_coplex_gains = self.algorithm.get_array_learnable_parameters(learnable=False)
 
+            # Compute MSE between real and estimated steering matrices
+            steering_matrix_mse = self._compute_steering_matrix_mse(true_angles)
             
             # Compute RMSPE for evaluation
             from src.metrics import RMSPELoss
@@ -569,7 +571,8 @@ class DoARunner:
             "learned_antenna_positions": learned_antenna_positions,
             "learned_antennas_gains": learned_coplex_gains,
             'music_spectrum': self.algorithm.music_spectrum.cpu().numpy() if self.algorithm.music_spectrum is not None else None,
-            'angles_grid': self.algorithm.angles_grid.cpu().numpy() if hasattr(self.algorithm, 'angles_grid') else None
+            'angles_grid': self.algorithm.angles_grid.cpu().numpy() if hasattr(self.algorithm, 'angles_grid') else None,
+            'steering_matrix_mse': steering_matrix_mse 
         }
     
     def save_model(self, path: Path):
@@ -844,10 +847,14 @@ class DoARunner:
         plt.legend(fontsize=10)
         
         # Add system info as text
+        steering_mse_text = ", ".join([f"{lf}: {results[lf].get('steering_matrix_mse', float('nan')):.3f}" 
+                                  for lf in loss_functions if 'error' not in results.get(lf, {})])
+
         info_text = (f"N={shared_data['system_params'].N}, "
                     f"M={shared_data['system_params'].M}, "
                     f"T={shared_data['system_params'].T}, "
-                    f"SNR={shared_data['system_params'].snr}dB")
+                    f"SNR={shared_data['system_params'].snr}dB\n"
+                    f"Steering MSE - {steering_mse_text}")
         plt.text(0.02, 0.98, info_text, transform=plt.gca().transAxes, 
                 verticalalignment='top', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
         
@@ -1049,3 +1056,35 @@ class DoARunner:
         
         print(f"Multi-loss learned parameters plot saved to: {save_path}")
         plt.show()
+
+
+    def _compute_steering_matrix_mse(self, true_angles: torch.Tensor) -> float:
+        """
+        Compute MSE between real and estimated steering matrices
+        
+        Args:
+            true_angles: True DoA angles in radians
+            
+        Returns:
+            MSE value
+        """
+        # Get real steering matrix from data_dict (computed during data creation)
+        real_steering_matrix = self.data_dict.get('steering_matrix', None)
+        
+        if real_steering_matrix is None:
+            return float('nan')  # Cannot compute if real steering matrix not available
+        
+        # Convert to torch tensor if needed and move to device
+        if not isinstance(real_steering_matrix, torch.Tensor):
+            real_steering_matrix = torch.from_numpy(real_steering_matrix)
+        real_steering_matrix = real_steering_matrix.to(self.device)
+        
+        true_angles = true_angles.to(self.device)
+        
+        # Compute estimated steering matrix using learned parameters
+        estimated_steering_matrix = self.algorithm.compute_steering_matrix(true_angles)
+        
+        # Compute MSE
+        mse = torch.mean(torch.abs(real_steering_matrix - estimated_steering_matrix) ** 2)
+        
+        return mse.item()
