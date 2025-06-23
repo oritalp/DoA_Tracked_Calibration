@@ -83,18 +83,18 @@ scenario_dict = { # Fill in to do multiple experiments
     # },
     
     # Example 3: T sweep with multi-loss
-    "T_sweep_multi_loss": {
-        "parameter": "T", 
-        "values": [20, 30, 50, 70, 100, 150, 200],
-        "loss_functions": ["rmspe", "spectrum", "unsupervised"],
-        "fixed_params": {"snr": 30},
-        "plot_config": {
-            "title": "RMSPE vs T (SNR=30dB) - Loss Function Comparison",
-            "x_label": "T (snapshots)",
-            "y_label": "RMSPE (degrees)", 
-            "save_name": "rmspe_vs_T_multi_loss"
-        }
-    }     
+    # "T_sweep_multi_loss": {
+    #     "parameter": "T", 
+    #     "values": [20, 30, 50, 70, 100, 150, 200],
+    #     "loss_functions": ["rmspe", "spectrum", "unsupervised"],
+    #     "fixed_params": {"snr": 30},
+    #     "plot_config": {
+    #         "title": "RMSPE vs T (SNR=30dB) - Loss Function Comparison",
+    #         "x_label": "T (snapshots)",
+    #         "y_label": "RMSPE (degrees)", 
+    #         "save_name": "rmspe_vs_T_multi_loss"
+    #     }
+    # }     
 }
 
 simulation_commands = {

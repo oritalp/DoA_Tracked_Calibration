@@ -785,11 +785,18 @@ class DoARunner:
         # Create figure
         plt.figure(figsize=(14, 8))
         
-        # Define colors and line styles for different loss functions
-        colors = {'rmspe': 'blue', 'spectrum': 'red', 'unsupervised': 'green'}
-        line_styles = {'rmspe': '-', 'spectrum': '--', 'unsupervised': '-.'}
+        # Define colors and line styles for different loss functions FIRST
+        colors = {'rmspe': 'blue', 'spectrum': 'red', 'unsupervised': 'green', 'physical': 'black'}
+        line_styles = {'rmspe': '-', 'spectrum': '--', 'unsupervised': '-.', 'physical': ':'}
         default_colors = ['blue', 'red', 'green', 'orange', 'purple', 'brown']
         default_styles = ['-', '--', '-.', ':', '-', '--']
+        
+        # Compute and plot physical parameters spectrum if available
+        physical_spectrum = self._compute_physical_spectrum()
+        if physical_spectrum is not None:
+            plt.plot(angles_deg, physical_spectrum, 
+                    color=colors['physical'], linestyle=line_styles['physical'], linewidth=3,
+                    label='Physical Parameters', alpha=0.8)
         
         # Plot spectrum for each loss function
         for i, loss_function in enumerate(loss_functions):
@@ -1088,3 +1095,65 @@ class DoARunner:
         mse = torch.mean(torch.abs(real_steering_matrix - estimated_steering_matrix) ** 2)
         
         return mse.item()
+    
+
+    def _compute_physical_spectrum(self) -> Optional[np.ndarray]:
+        """
+        Compute MUSIC spectrum using physical parameters for comparison
+        
+        Returns:
+            Physical spectrum as numpy array, or None if physical parameters not available
+        """
+        # Check if physical parameters are available
+        physical_array = self.data_dict.get('physical_array', None)
+        physical_gains = self.data_dict.get('physical_antennas_gains', None)
+        
+        if physical_array is None or physical_gains is None:
+            print("Warning: Physical parameters not available for spectrum computation")
+            return None
+        
+        try:
+            # Convert to torch tensors if needed
+            if not isinstance(physical_array, torch.Tensor):
+                physical_array = torch.from_numpy(physical_array)
+            if not isinstance(physical_gains, torch.Tensor):
+                physical_gains = torch.from_numpy(physical_gains)
+            
+            # Move to device
+            physical_array = physical_array.to(self.device).to(torch.float64)
+            physical_gains = physical_gains.to(self.device).to(torch.complex64)
+            
+            # Check if noise subspace is available from the algorithm
+            if not hasattr(self.algorithm, 'noise_subspace') or self.algorithm.noise_subspace is None:
+                print("Warning: No noise subspace available for physical spectrum computation")
+                return None
+            
+            # Save current learned parameters
+            with torch.no_grad():
+                current_positions = self.algorithm.antenna_positions.clone()
+                current_gains = self.algorithm.complex_gain.clone()
+                
+                # Temporarily set to physical parameters
+                self.algorithm.antenna_positions.copy_(physical_array)
+                self.algorithm.complex_gain.copy_(physical_gains)
+                
+                # Compute spectrum using physical parameters
+                inverse_spectrum = self.algorithm._compute_inverse_spectrum(self.algorithm.noise_subspace)
+                physical_spectrum = 1 / (inverse_spectrum + 1e-10)
+                
+                # Remove batch dimension and convert to numpy
+                if physical_spectrum.dim() == 2 and physical_spectrum.shape[0] == 1:
+                    physical_spectrum = physical_spectrum.squeeze(0)
+                physical_spectrum = physical_spectrum.cpu().detach().numpy()
+                
+                # Restore learned parameters
+                self.algorithm.antenna_positions.copy_(current_positions)
+                self.algorithm.complex_gain.copy_(current_gains)
+            
+            return physical_spectrum
+            
+        except Exception as e:
+            print(f"Error computing physical spectrum: {e}")
+            import traceback
+            traceback.print_exc()  # This will help debug any remaining issues
+            return None
