@@ -606,4 +606,27 @@ class DoARunner:
                         true_angles,
                         path
                     )
+        # Plot learned parameters (Figure 3 style) for diffMUSIC
+        if self.system_params.model_type.lower() == "diffmusic" and self.system_params.plot_results: # TODO: check with Ori
+            # Get physical parameters for comparison
+            physical_array = self.data_dict.get('physical_array', None)
+            physical_gains = self.data_dict.get('physical_antennas_gains', None)
+            
+            # Convert to torch tensors if they're numpy arrays
+            if physical_array is not None and not isinstance(physical_array, torch.Tensor):
+                physical_array = torch.from_numpy(physical_array)
+            if physical_gains is not None and not isinstance(physical_gains, torch.Tensor):
+                physical_gains = torch.from_numpy(physical_gains)
+            
+            # Create title based on loss type and performance
+            rmspe = self.results.get('rmspe', 0)
+            loss_type = getattr(self.system_params, 'loss_type', 'unknown')
+            title = f"Learned Parameters ({loss_type.upper()}) - RMSPE: {rmspe:.3f}°"
+            
+            self.algorithm.plot_learned_parameters(
+                true_positions=physical_array,
+                true_gains=physical_gains,
+                path_to_save=path,
+                title=title
+            )
         return None

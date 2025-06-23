@@ -412,6 +412,122 @@ class DiffMUSIC(SubspaceMethod):
             plt.savefig(path_to_save / f"Spectrum.png", dpi=300)
         plt.show()
 
+    def plot_learned_parameters(self, true_positions: torch.Tensor = None, true_gains: torch.Tensor = None, 
+                          path_to_save: str = None, title: str = "Learned Parameters"):
+        """
+        Plot learned antenna parameters similar to Figure 3 in the paper
+
+        Args:
+            true_positions: True antenna positions for comparison
+            true_gains: True antenna gains for comparison  
+            path_to_save: Path to save the plot
+            title: Plot title
+        """
+        import matplotlib.pyplot as plt
+        import matplotlib.patches as patches
+
+        # Get learned parameters
+        learned_positions = self.antenna_positions.detach().cpu().numpy()
+        learned_gains = self.complex_gain.detach().cpu().numpy()
+
+        # Convert positions to wavelength units for display
+        learned_positions_wl = learned_positions / (self.wavelength / 2)
+
+        fig, ax = plt.subplots(1, 1, figsize=(16, 6))
+
+        # Vertical separation between learned and physical parameters
+        learned_y = 0.5
+        physical_y = -0.5
+
+        # Plot learned parameters (blue, top row)
+        for i, (pos, gain) in enumerate(zip(learned_positions_wl, learned_gains)):
+            # Circle radius represents gain magnitude
+            radius = abs(gain) * 0.25  # Slightly smaller for better visibility
+            
+            # Circle color and segment angle represent gain phase
+            phase = np.angle(gain)
+            
+            # Draw circle
+            circle = patches.Circle((pos, learned_y), radius, 
+                                    facecolor='lightblue', 
+                                    edgecolor='blue', 
+                                    linewidth=2, 
+                                    alpha=0.7,
+                                    label='Learned' if i == 0 else "")
+            ax.add_patch(circle)
+            
+            # Draw phase segment (line from center to edge)
+            segment_x = pos + radius * np.cos(phase)
+            segment_y = learned_y + radius * np.sin(phase)
+            ax.plot([pos, segment_x], [learned_y, segment_y], 'b-', linewidth=2)
+            
+            # Add antenna number above the circle
+            ax.text(pos, learned_y + 0.4, f'{i}', ha='center', va='center', fontsize=10, fontweight='bold')
+
+        # Plot true parameters if provided (red, bottom row)
+        if true_positions is not None and true_gains is not None:
+            true_positions_np = true_positions.cpu().numpy() if isinstance(true_positions, torch.Tensor) else true_positions
+            true_gains_np = true_gains.cpu().numpy() if isinstance(true_gains, torch.Tensor) else true_gains
+            
+            true_positions_wl = true_positions_np / (self.wavelength / 2)
+            
+            for i, (pos, gain) in enumerate(zip(true_positions_wl, true_gains_np)):
+                radius = abs(gain) * 0.25  # Same scaling as learned
+                phase = np.angle(gain)
+                
+                # Draw circle with different style
+                circle = patches.Circle((pos, physical_y), radius, 
+                                        facecolor='lightcoral', 
+                                        edgecolor='red', 
+                                        linewidth=2, 
+                                        alpha=0.7,
+                                        label='Physical' if i == 0 else "")
+                ax.add_patch(circle)
+                
+                # Draw phase segment
+                segment_x = pos + radius * np.cos(phase)
+                segment_y = physical_y + radius * np.sin(phase)
+                ax.plot([pos, segment_x], [physical_y, segment_y], 'r-', linewidth=2)
+                
+                # Add antenna number below the circle
+                ax.text(pos, physical_y - 0.4, f'{i}', ha='center', va='center', fontsize=10, fontweight='bold')
+
+        # Add horizontal reference lines
+        ax.axhline(y=learned_y, color='blue', linestyle=':', alpha=0.3, linewidth=1)
+        if true_positions is not None and true_gains is not None:
+            ax.axhline(y=physical_y, color='red', linestyle=':', alpha=0.3, linewidth=1)
+
+        # Set axis limits and labels
+        ax.set_xlim(-0.5, max(learned_positions_wl) + 0.5)
+        ax.set_ylim(-1.2, 1.2)
+        ax.set_xlabel('x [λ/2]', fontsize=12, fontweight='bold')
+        ax.set_ylabel('')
+        ax.set_title(title, fontsize=14, fontweight='bold')
+        ax.grid(True, alpha=0.3)
+
+        # Create custom legend
+        legend_elements = [
+            plt.Line2D([0], [0], marker='o', color='w', markerfacecolor='lightblue', 
+                        markersize=10, markeredgecolor='blue', markeredgewidth=2, label='Learned'),
+        ]
+        if true_positions is not None and true_gains is not None:
+            legend_elements.append(
+                plt.Line2D([0], [0], marker='o', color='w', markerfacecolor='lightcoral', 
+                            markersize=10, markeredgecolor='red', markeredgewidth=2, label='Physical')
+            )
+
+        ax.legend(handles=legend_elements, loc='upper right', fontsize=12)
+
+        # Remove y-axis ticks for cleaner look
+        ax.set_yticks([])
+
+        plt.tight_layout()
+
+        if path_to_save is not None:
+            plt.savefig(path_to_save / "learned_parameters.png", dpi=300, bbox_inches='tight')
+
+        plt.show()
+
 
 class DiffMUSICLoss(nn.Module):
     """
