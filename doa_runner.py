@@ -439,7 +439,8 @@ class DoARunner:
         self.training_history = {
             'train_loss': [],
             'val_loss': [],
-            'learning_rates': []
+            'learning_rates': [],
+            'steering_mse': []
         }
 
         print(f"Training for {self.system_params.epochs} epochs...")
@@ -447,8 +448,13 @@ class DoARunner:
         for epoch in tqdm(range(self.system_params.epochs), desc="Training"):
             epoch_loss = self._train_epoch(self.cov_matrix, true_angles, M)
             
+            # Compute steering MSE for this epoch
+            with torch.no_grad():
+                steering_mse = self._compute_steering_matrix_mse(true_angles.squeeze(0))
+        
             # Store training history
             self.training_history['train_loss'].append(epoch_loss)
+            self.training_history['steering_mse'].append(steering_mse)
             if self.optimizer:
                 current_lr = self.optimizer.param_groups[0]['lr']
                 self.training_history['learning_rates'].append(current_lr)
@@ -460,6 +466,7 @@ class DoARunner:
                     wandb.log({
                         "epoch": epoch,
                         "train_loss": epoch_loss,
+                        "steering_mse": steering_mse,  
                         "learning_rate": current_lr if self.optimizer else 0
                     })
                 except:
@@ -474,7 +481,7 @@ class DoARunner:
             
             # Print progress
             if (epoch + 1) % 10 == 0 or epoch == 0:
-                print(f"Epoch {epoch+1}/{self.system_params.epochs}, Loss: {epoch_loss:.6f}")
+                print(f"Epoch {epoch+1}/{self.system_params.epochs}, Loss: {epoch_loss:.6f}, Steering MSE: {steering_mse:.6f}")
         
         return {
             'training_history': self.training_history,

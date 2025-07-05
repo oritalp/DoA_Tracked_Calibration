@@ -82,7 +82,7 @@ scenario_dict = { # Fill in to do multiple experiments
     #     }
     # },
     
-    # Example 3: T sweep with multi-loss
+    # # Example 3: T sweep with multi-loss
     # "T_sweep_multi_loss": {
     #     "parameter": "T", 
     #     "values": [20, 30, 50, 70, 100, 150, 200],
@@ -101,7 +101,7 @@ simulation_commands = {
     "create_data": True,
     "save_data": False,  # Save data after creation
     "plot_results": True,  # Plot data after creation
-    "multi_loss_comparison": False,  # Enable multi-loss spectrum and learned parameters comparison, if multiple experiments then need to be False
+    "multi_loss_comparison": True,  # Enable multi-loss spectrum and learned parameters comparison, if multiple experiments then need to be False
     "spectrum_loss_functions": ["rmspe", "spectrum", "unsupervised"],  # Loss functions to compare
     "data_loading_path": "datasets/N:16_M:5_T:100_snr:10_location_pert_boundary:0.25_gain_perturbation_var:0.36_seed:42/03_06_2025_15_06/data.pkl"
     # This is the path to the data file, ONLY USED if CREATE_DATA is False!
