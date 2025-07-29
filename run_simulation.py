@@ -25,6 +25,7 @@ def run_single_simulation(**kwargs):
     SYSTEM_MODEL_PARAMS = kwargs["system_model_params"]
     MODEL_CONFIG = kwargs["model_config"]
     TRAINING_PARAMS = kwargs["training_params"]
+    PLOTTING_PARAMS = kwargs.get("plotting_params", {})
     plot_results = SIMULATION_COMMANDS["plot_results"]
     create_data = SIMULATION_COMMANDS["create_data"]  # Creating new dataset
     save_data = SIMULATION_COMMANDS["save_data"]  # Save created data to file
@@ -41,7 +42,7 @@ def run_single_simulation(**kwargs):
     utils.set_unified_seed(SYSTEM_MODEL_PARAMS["seed"])
 
     # Define system model parameters - unify all parameters
-    system_model_params = SystemModelParams(**SYSTEM_MODEL_PARAMS, **MODEL_CONFIG, **TRAINING_PARAMS, **SIMULATION_COMMANDS)
+    system_model_params = SystemModelParams(**SYSTEM_MODEL_PARAMS, **MODEL_CONFIG, **TRAINING_PARAMS, **SIMULATION_COMMANDS, **PLOTTING_PARAMS)
     
     # Add dt_string for wandb project naming
     system_model_params.dt_string_for_save = dt_string_for_save
@@ -159,7 +160,7 @@ def run_multi_loss_comparison(**kwargs):
     Run multi-loss spectrum and learned parameters comparison for the same data with different loss functions
     
     Args:
-        **kwargs: Contains simulation_commands, system_model_params, model_config, training_params
+        **kwargs: Contains simulation_commands, system_model_params, model_config, training_params, plotting_params
         
     Returns:
         Dictionary with multi-loss spectrum comparison results
@@ -168,6 +169,7 @@ def run_multi_loss_comparison(**kwargs):
     SYSTEM_MODEL_PARAMS = kwargs["system_model_params"]
     MODEL_CONFIG = kwargs["model_config"]
     TRAINING_PARAMS = kwargs["training_params"]
+    PLOTTING_PARAMS = kwargs.get("plotting_params", {})
     
     create_data = SIMULATION_COMMANDS["create_data"]
     save_data = SIMULATION_COMMANDS["save_data"]
@@ -186,7 +188,7 @@ def run_multi_loss_comparison(**kwargs):
     utils.set_unified_seed(SYSTEM_MODEL_PARAMS["seed"])
 
     # Define system model parameters - unify all parameters
-    system_model_params = SystemModelParams(**SYSTEM_MODEL_PARAMS, **MODEL_CONFIG, **TRAINING_PARAMS, **SIMULATION_COMMANDS)
+    system_model_params = SystemModelParams(**SYSTEM_MODEL_PARAMS, **MODEL_CONFIG, **TRAINING_PARAMS, **SIMULATION_COMMANDS, **PLOTTING_PARAMS)
     
     # Add dt_string for naming
     system_model_params.dt_string_for_save = dt_string_for_save

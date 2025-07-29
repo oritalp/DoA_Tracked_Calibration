@@ -10,7 +10,7 @@ class RMSPELoss(nn.Module):
     Handles the periodic nature of angles and permutation invariance
     """
     
-    def __init__(self, balance_factor: float = None):
+    def __init__(self, balance_factor: float = None, degrees: bool = True):
         """
         Args:
             balance_factor: Weighting factor for the loss (1.0 for getting the loss as is,
@@ -18,6 +18,7 @@ class RMSPELoss(nn.Module):
         """
         super(RMSPELoss, self).__init__()
         self.balance_factor = balance_factor
+        self.degrees = degrees
     
     def forward(self, predictions: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
         """
@@ -67,6 +68,10 @@ class RMSPELoss(nn.Module):
         # Wrap to [-π, π] (not critical for angles in [-π/2, π/2] but here for generality)
         diff = torch.atan2(torch.sin(diff), torch.cos(diff))
         
+        if self.degrees:
+            # Convert to degrees if needed
+            diff = diff * (180.0 / torch.pi)
+
         # Compute MSE
         mse = torch.mean(diff ** 2, dim=1)
         
@@ -79,8 +84,28 @@ class SpectrumLoss(nn.Module):
     Maximizes spectrum amplitude at true DoA locations
     """
     
-    def __init__(self):
+    def __init__(self, maximum_spectrum_power: float = None, sharpness: float = 10.0, 
+                 log_loss_spectrum: bool = False):
+        """
+        Args:
+            maximum_spectrum_power: Maximum spectrum power for clipping (None to disable)
+            sharpness: Sharpness parameter for differentiable min operation (higher = sharper)
+            log_loss_spectrum: Use the log of spectrum values to prevent exploding peaks
+        """
         super(SpectrumLoss, self).__init__()
+        self.maximum_spectrum_power = maximum_spectrum_power
+        self.sharpness = sharpness
+        self.log_loss_spectrum = log_loss_spectrum
+        
+        # # Warning about double suppression effects
+        # if self.log_loss_spectrum and self.maximum_spectrum_power is not None:
+        #     import warnings
+        #     warnings.warn(
+        #         "Both log_loss_spectrum=True and maximum_spectrum_power are enabled. "
+        #         "This creates double suppression effects which may negatively impact training. "
+        #         "Consider using only one suppression method.",
+        #         UserWarning
+        #     )
     
     def forward(self, spectrum: torch.Tensor, true_angles: torch.Tensor, 
                 angles_grid: torch.Tensor) -> torch.Tensor:
@@ -102,8 +127,31 @@ class SpectrumLoss(nn.Module):
             for angle in true_angles[batch]:
                 # Find closest angle in grid
                 angle_idx = torch.argmin(torch.abs(angles_grid - angle))
+                spectrum_value = spectrum[batch, angle_idx]
+                
+                # Apply log transformation if enabled
+                if self.log_loss_spectrum:
+                    # Use log(spectrum + epsilon) to prevent log(0) and exploding peaks
+                    epsilon = 1e-8
+                    spectrum_value = torch.log(spectrum_value + epsilon)
+                
+                # Apply maximum spectrum power clipping if enabled
+                if self.maximum_spectrum_power is not None:
+                    # Use standard LogSumExp trick for differentiable min operation
+                    # min(a, b) = -log(exp(-β*a) + exp(-β*b)) / β
+                    max_power = torch.tensor(self.maximum_spectrum_power, device=spectrum.device, dtype=spectrum.dtype)
+                    
+                    # Standard LogSumExp min
+                    beta = self.sharpness
+                    exp_neg_s = torch.exp(-beta * spectrum_value)
+                    exp_neg_m = torch.exp(-beta * max_power)
+                    clamped_spectrum = -torch.log(exp_neg_s + exp_neg_m) / beta
+                else:
+                    clamped_spectrum = spectrum_value
+            
+
                 # Negative spectrum value (to maximize)
-                total_loss -= spectrum[batch, angle_idx]
+                total_loss -= clamped_spectrum
         
         # Uncomment the following row to normalize also by the number of true angles, this is not done
         # here for consistency with the paper loss definition. Doesn't influence the optimization.

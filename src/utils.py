@@ -156,7 +156,7 @@ def spatial_smoothing_covariance(x: torch.Tensor):
     # Define the number of sub-arrays
     number_of_sub_arrays = sensor_number - sub_array_size + 1
     # Initialize covariance matrix
-    Rx_smoothed = torch.zeros(batch_size, sub_array_size, sub_array_size, dtype=torch.complex128, device=device)
+    Rx_smoothed = torch.zeros(batch_size, sub_array_size, sub_array_size, dtype=torch.complex128, device=x.device)
     Rx = sample_covariance(x)
     for j in range(number_of_sub_arrays):
         Rx_smoothed += Rx[:, j:j + sub_array_size, j:j + sub_array_size] / number_of_sub_arrays
@@ -180,8 +180,8 @@ def set_unified_seed(seed: int = 42):
     """
     random.seed(seed)
     np.random.seed(seed)
-    torch.manual_seed(42)
-    torch.cuda.manual_seed_all(42)
+    torch.manual_seed(seed)  # Fixed: was using 42 instead of seed
+    torch.cuda.manual_seed_all(seed)  # Fixed: was using 42 instead of seed
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
     if torch.cuda.is_available():

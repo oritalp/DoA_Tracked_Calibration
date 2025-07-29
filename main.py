@@ -31,13 +31,11 @@ import argparse
 import torch
 
 #TODO: 
-# 1. Right now, each experiment is saved alone (while optimizing the sotfmax window size).
-# we need to create also a multi-case scenario where we can test different cross products of parameters.
-# Something similiar to the old scenario_dict, but not necessirilly it. for the clearness of the code 
-# we might want to create a new class for this, including the plotting capabilities (next point)
+# Right now, there are major duplications in the code which is very bad. Specifically, the multiloss run function
+# is almost identical to the single loss run function. It can be easily alleviated but unifying these two functions and
+# check if the length of the loss functions is 1 or more. Sheli's additions are not supporting the optimization of the window 
+# size.
 
-# 2. based on the multi-case results, create functions plotting relevanmt graphs from the paper to
-# test our recreation. not such a big deal, please arrange it under one class.
 
 #NOTE:
 # points for the future:
@@ -101,8 +99,8 @@ simulation_commands = {
     "create_data": True,
     "save_data": False,  # Save data after creation
     "plot_results": True,  # Plot data after creation
-    "multi_loss_comparison": True,  # Enable multi-loss spectrum and learned parameters comparison, if multiple experiments then need to be False
-    "spectrum_loss_functions": ["rmspe", "spectrum", "unsupervised"],  # Loss functions to compare
+    "multi_loss_comparison": False,  # Enable multi-loss spectrum and learned parameters comparison, if multiple experiments then need to be False
+    "spectrum_loss_functions": ["rmspe"],  # Loss functions to compare
     "data_loading_path": "datasets/N:16_M:5_T:100_snr:10_location_pert_boundary:0.25_gain_perturbation_var:0.36_seed:42/03_06_2025_15_06/data.pkl"
     # This is the path to the data file, ONLY USED if CREATE_DATA is False!
     # By now, this gets set manually.
@@ -112,19 +110,19 @@ system_model_params = {
     "N": 16,  # number of antennas
     "M": 5,  # number of sources
     "T": 100,  # number of snapshots
-    "snr": 10,  # if defined, values in scenario_dict will be ignored 
+    "snr": 30,  # if defined, values in scenario_dict will be ignored 
     "bias": 0, # steering vector bias error
-    "sv_noise_var": 0.0, # steering vector addative gaussian error noise variance
-    "doa_range": 60, # The range of the DOA values [-doa_range, doa_range]
+    "sv_noise_var": 0.0, # steering vector additive gaussian error noise variance
+    "doa_range": 80, # The range of the DOA values [-doa_range, doa_range]
     "doa_resolution": .5, # The resolution of the DOA values in degrees
-    "wavelength": 1, # The carrier wavelength of the signal in meters, 1 can be fine for research,
+    "wavelength": (3e8/2.4e9), # The carrier wavelength of the signal in meters, 1 can be fine for research,
     # 0.06 is for wifi 5 GHz for example.
 
     "location_perturbation": "wavelength/4",  # The boundaries of the location perturbation in meters, 
     # insert any valid float between 0 and wavelength/4 or "wavelength/n" to use with reference to the wavelength
     
     "gain_perturbation_var": 0.36, # The variance of the gain perturbation
-    "seed": 42,  # Seed for reproducibility
+    "seed": 0,  # Seed for reproducibility
     ############################### Fixed for now ##################################
     "field_type": "Far",  # Near, Far
     "signal_type": "Narrowband",  # Narrowband, broadband
@@ -133,31 +131,39 @@ system_model_params = {
 
 model_config = \
 {
-    "model_type": "diffMUSIC",  # or "MUSIC"
+    "model_type": "diffMUSIC",  # or "diffMUSIC" or "MUSIC"
     
     # Case 1: Fixed integer window size (original behavior)
     # "softmax_window_size": 21,
     
     # Case 2: Relative window size (float between 0-1)
-    "softmax_window_size": 0.1,  # % of angle grid length
+    "softmax_window_size": 0.03,  # % of angle grid length
     
-    # Case 3: Window size optimization (array/list of values)
-    # "softmax_window_size": np.arange(0.01, 0.4, 0.01),  # Relative sizes: [0.2, 0.25, 0.3, 0.35]
-    # "softmax_window_size": [15, 21, 27, 33],  # Absolute sizes
-    # "softmax_window_size": [0.25, 21, 0.35, 27],  # Mixed relative and absolute
+    # # Case 3: Window size optimization (array/list of values)
+    # "softmax_window_size": np.arange(0.01, 0.04, 0.01),  # range of % relative window sizes
+    # # "softmax_window_size": [15, 21, 27, 33],  # Absolute sizes
+    # # "softmax_window_size": [0.25, 21, 0.35, 27],  # Mixed relative and absolute
 }
 
 
 training_params = {
     # "batch_size": 128,  # Note: This is legacy parameter, actual batch size is handled by snapshots
-    "epochs": 100,
+    "epochs": 1000,
     "loss_type": "spectrum",  # rmspe, spectrum, unsupervised
     "optimizer": "Adam",  # Adam, SGD
-    "scheduler": "ReduceLROnPlateau",  # StepLR, ReduceLROnPlateau
-    "learning_rate": 0.001,
+    "scheduler": None,  # StepLR, ReduceLROnPlateau, None
+    "learning_rate": 4e-3,
     "step_size": 50,
     "weight_decay": 0.0,
-    "use_wandb": False
+    "use_wandb": True,
+    "gradients_debug": False,  # Enable detailed gradient and parameter debugging
+    "maximum_spectrum_power": None,  # Maximum spectrum power clipping for balanced learning (ONLY USING SPECTRUM LOSS)
+    "log_loss_spectrum": True,  # Use the log of the spectrum powers for the spectrum loss to prevent peaks exploding
+    "max_grad_norm": 1e-2  # Maximum gradient norm for clipping. If None, no clipping. If float/int, clip gradients to this norm
+}
+
+plotting_params = {
+    "plot_physical_spectrum": True,  # Plot diffMUSIC spectrum using actual physical parameters for comparison
 }
 
 
@@ -186,6 +192,8 @@ def parse_arguments():
     parser.add_argument('-lr', '--learning_rate', type=float, help='Learning rate', default=None)
     parser.add_argument('-wd', '--weight_decay', type=float, help='Weight decay', default=None)
     parser.add_argument('-step', '--step_size', type=int, help='Step size', default=None)
+    parser.add_argument('--maximum_spectrum_power', type=float, help='Maximum spectrum power for balanced learning (None to disable)', default=None)
+    parser.add_argument('--max_grad_norm', type=float, help='Maximum gradient norm for clipping (None to disable)', default=None)
 
     parser.add_argument('-w', '--wandb', action="store_true", help='Use wandb')
     parser.add_argument('-c', '--create', action="store_true", help='create a new dataset')
@@ -252,6 +260,10 @@ if __name__ == "__main__":
         training_params["weight_decay"] = args.weight_decay
     if args.step_size is not None:
         training_params["step_size"] = args.step_size
+    if args.maximum_spectrum_power is not None:
+        training_params["maximum_spectrum_power"] = args.maximum_spectrum_power
+    if args.max_grad_norm is not None:
+        training_params["max_grad_norm"] = args.max_grad_norm
 
     if args.wandb:
         training_params["use_wandb"] = args.wandb
@@ -270,6 +282,7 @@ if __name__ == "__main__":
                            system_model_params=system_model_params,
                            model_config=model_config,
                            training_params=training_params,
+                           plotting_params=plotting_params,
                            scenario_dict=scenario_dict)
     print("Total time: ", time.time() - start)
     
@@ -295,7 +308,9 @@ if __name__ == "__main__":
             print("Compared to the physical array positions:")
             print(f"Physical antennas positions: {results['physical_array']}")
             print(f"Learned antennas gains: {results['learned_antennas_gains']}")
-            print(f"Learned antennas gains phase: {np.round(np.angle(results['learned_antennas_gains']), 4)}")
+            print(f"Learned antennas gains phase: {np.round(np.angle(results['learned_antennas_gains'], deg=True), 4)}")
+            print(f"Learned antennas gains magnitude: {np.round(np.abs(results['learned_antennas_gains']), 4)}")
             print("Compared to the physical antennas gains:")
             print(f"Physical antennas gains: {results['physical_antennas_gains']}")
-            print(f"Physical antennas gains phase: {np.round(np.angle(results['physical_antennas_gains']), 4)}")
+            print(f"Physical antennas gains phase: {np.round(np.angle(results['physical_antennas_gains'], deg=True), 4)}")
+            print(f"Physical antennas gains magnitude: {np.round(np.abs(results['physical_antennas_gains']), 4)}")

@@ -16,7 +16,8 @@ import time
 from typing import Dict, Any, Optional, Tuple, List
 
 from src.utils import sample_covariance
-
+import matplotlib.patches as patches
+import matplotlib.pyplot as plt
 
 class AlgorithmFactory:
     """
@@ -207,7 +208,14 @@ class DoARunner:
 
         
         # Create loss function
-        self.loss_fn = self.factory.create_loss_function(loss_type)
+        loss_kwargs = {}
+        if loss_type == "spectrum":
+            if hasattr(self.system_params, 'maximum_spectrum_power'):
+                loss_kwargs['maximum_spectrum_power'] = self.system_params.maximum_spectrum_power
+            if hasattr(self.system_params, 'log_loss_spectrum'):
+                loss_kwargs['log_loss_spectrum'] = self.system_params.log_loss_spectrum
+        
+        self.loss_fn = self.factory.create_loss_function(loss_type, **loss_kwargs)
         
         # Create optimizer
         self.optimizer = self.factory.create_optimizer(
@@ -225,7 +233,7 @@ class DoARunner:
             patience=getattr(self.system_params, 'patience', 10)
         )
     
-    def _setup_wandb(self, window_size, trial_idx=None):
+    def _setup_wandb(self, window_size):
         """
         Setup wandb logging if enabled
         
@@ -243,13 +251,9 @@ class DoARunner:
             dt_string = getattr(self.system_params, 'dt_string_for_save', 
                               datetime.now().strftime("%d_%m_%Y_%H_%M"))
             project_name = f"{self.system_params.model_type}_{dt_string}"
-            
-            # Create run name
-            if trial_idx is not None:
-                run_name = f"trial_{trial_idx+1}_window_size_{window_size}_{self.system_params.loss_type}"
-            else:
-                run_name = f"winsow_size_{window_size}_{self.system_params.loss_type}"
-            
+
+            run_name = f"window_size_{window_size:.4f}_{self.system_params.loss_type}"
+
             # Initialize wandb
             wandb.init(
                 project=project_name,
@@ -328,13 +332,8 @@ class DoARunner:
             system_model_params=self.system_params
         )
         
-        # Set the specific window size
-        if isinstance(window_size, float) and 0 < window_size < 1:
-            # Case 2: relative to grid size
-            algorithm.window_size = int(window_size * len(algorithm.angles_grid))
-        else:
-            # Case 1: absolute size
-            algorithm.window_size = int(window_size)
+        # Set the specific window size using the proper method
+        algorithm.set_window_size(window_size)
         
         return algorithm.to(self.device)
     
@@ -366,13 +365,18 @@ class DoARunner:
             else:
                 print(f"Running with window_size={window_size}")
             
+            # Reset seed for consistent initialization across trials 
+            # This ensures fair comparison between different window sizes
+            from src.utils import set_unified_seed
+            set_unified_seed(self.system_params.seed)
+            
             # Create fresh algorithm instance with reset parameters
             self.algorithm = self._create_fresh_algorithm(window_size)
             
             # Setup fresh training components and wandb
             if self._needs_training():
                 self._setup_training()
-                self._setup_wandb(window_size, trial_idx=i if optimization_mode else None)
+                self._setup_wandb(window_size)
             
             # Run complete training + evaluation cycle
             results = {}
@@ -440,21 +444,27 @@ class DoARunner:
             'train_loss': [],
             'val_loss': [],
             'learning_rates': [],
-            'steering_mse': []
+            'position_l2_diff': [],
+            'gain_l2_diff': [],
+            'position_grad_magnitude': [],
+            'gain_grad_magnitude': []
         }
 
         print(f"Training for {self.system_params.epochs} epochs...")
         
         for epoch in tqdm(range(self.system_params.epochs), desc="Training"):
-            epoch_loss = self._train_epoch(self.cov_matrix, true_angles, M)
+            epoch_loss, position_grad_mag, gain_grad_mag = self._train_epoch(self.cov_matrix, true_angles, M)
             
-            # Compute steering MSE for this epoch
+            # Compute L2 differences between true and learned parameters
             with torch.no_grad():
-                steering_mse = self._compute_steering_matrix_mse(true_angles.squeeze(0))
+                position_l2_diff, gain_l2_diff = self._compute_parameter_l2_differences()
         
             # Store training history
             self.training_history['train_loss'].append(epoch_loss)
-            self.training_history['steering_mse'].append(steering_mse)
+            self.training_history['position_l2_diff'].append(position_l2_diff)
+            self.training_history['gain_l2_diff'].append(gain_l2_diff)
+            self.training_history['position_grad_magnitude'].append(position_grad_mag)
+            self.training_history['gain_grad_magnitude'].append(gain_grad_mag)
             if self.optimizer:
                 current_lr = self.optimizer.param_groups[0]['lr']
                 self.training_history['learning_rates'].append(current_lr)
@@ -463,11 +473,23 @@ class DoARunner:
             if getattr(self.system_params, 'use_wandb', False):
                 try:
                     import wandb
+                    
+                    # Compute norm of learned gains for logging
+                    learned_gains_norm = 0.0
+                    if hasattr(self.algorithm, 'complex_gain'):
+                        _, learned_gains = self.algorithm.get_array_learnable_parameters(learnable=False)
+                        normalized_learned_gains_norm = np.linalg.norm(learned_gains)/ np.sqrt(len(learned_gains))  # Normalize by sqrt(M) for stability
+
+                        
                     wandb.log({
                         "epoch": epoch,
                         "train_loss": epoch_loss,
-                        "steering_mse": steering_mse,  
-                        "learning_rate": current_lr if self.optimizer else 0
+                        "position_l2_diff": position_l2_diff,
+                        "gain_l2_diff": gain_l2_diff,
+                        "normalized_learned_gains_norm": normalized_learned_gains_norm,
+                        "learning_rate": current_lr if self.optimizer else 0,
+                        "position_grad_magnitude": position_grad_mag,
+                        "gain_grad_magnitude": gain_grad_mag
                     })
                 except:
                     pass
@@ -481,14 +503,16 @@ class DoARunner:
             
             # Print progress
             if (epoch + 1) % 10 == 0 or epoch == 0:
-                print(f"Epoch {epoch+1}/{self.system_params.epochs}, Loss: {epoch_loss:.6f}, Steering MSE: {steering_mse:.6f}")
+                print(f"Epoch {epoch+1}/{self.system_params.epochs}, Loss: {epoch_loss:.6f}, ",
+                      f"Pos L2: {position_l2_diff:.6f}, Gain L2: {gain_l2_diff:.6f}, ",
+                      f"Pos Grad: {position_grad_mag:.6f}, Gain Grad: {gain_grad_mag:.6f}", sep=" ")
         
         return {
             'training_history': self.training_history,
             'final_train_loss': epoch_loss
         }
     
-    def _train_epoch(self, cov_matrix: torch.Tensor, true_angles: torch.Tensor, M: int) -> float:
+    def _train_epoch(self, cov_matrix: torch.Tensor, true_angles: torch.Tensor, M: int) -> tuple:
         """
         Train for one epoch
         
@@ -498,7 +522,7 @@ class DoARunner:
             M: Number of sources
             
         Returns:
-            Epoch loss
+            tuple: (epoch_loss, position_grad_magnitude, gain_grad_magnitude)
         """
         self.optimizer.zero_grad()
         
@@ -527,15 +551,177 @@ class DoARunner:
         # Compute loss
         loss = self.loss_fn(**loss_kwargs)
         
-        # Handle different loss return types
-        if isinstance(loss, torch.Tensor) and loss.dim() > 0:
-            loss = loss.mean()
+        # DIAGNOSTIC CODE - Track parameters before backward pass if debugging enabled
+        if getattr(self.system_params, 'gradients_debug', False):
+            with torch.no_grad():
+                # Track parameter values before backward pass
+                if hasattr(self.algorithm, 'antenna_positions'):
+                    pos_mean_before = torch.mean(self.algorithm.antenna_positions).item()
+                    pos_std_before = torch.std(self.algorithm.antenna_positions).item()
+                if hasattr(self.algorithm, 'complex_gain'):
+                    gain_mean_mag_before = torch.mean(torch.abs(self.algorithm.complex_gain)).item()
+                    gain_std_mag_before = torch.std(torch.abs(self.algorithm.complex_gain)).item()
+                
+                # Track spectrum peak powers at estimated angles
+                peak_powers = []
+                peak_angles = []
+                if hasattr(self.algorithm, 'music_spectrum') and self.algorithm.music_spectrum is not None:
+                    # Get hard peak indices for current spectrum
+                    hard_peak_indices = self.algorithm._hard_peak_finder(M, return_angles=False)
+                    
+                    # Extract peak powers and corresponding angles for the batch (assuming batch_size=1)
+                    batch_idx = 0
+                    spectrum = self.algorithm.music_spectrum[batch_idx]  # Shape: (num_angles,)
+                    angles_grid = self.algorithm.angles_grid.cpu().numpy()
+                    
+                    for peak_idx in hard_peak_indices[batch_idx]:
+                        if 0 <= peak_idx < len(spectrum):
+                            peak_powers.append(spectrum[peak_idx].item())
+                            peak_angles.append(angles_grid[peak_idx])
+                        else:
+                            peak_powers.append(0.0)  # Fallback for out-of-bounds
+                            peak_angles.append(0.0)
+                    
+                    # Convert to numpy arrays for easier manipulation
+                    current_peak_powers = np.array(peak_powers)
+                    current_peak_angles = np.array(peak_angles)
+                    
+                    # Match peaks to previous epoch if we have previous data
+                    if hasattr(self, '_prev_peak_angles') and len(self._prev_peak_angles) == len(current_peak_angles):
+                        # Create a distance matrix between current and previous peak angles
+                        prev_angles = np.array(self._prev_peak_angles)
+                        distance_matrix = np.abs(current_peak_angles[:, np.newaxis] - prev_angles[np.newaxis, :])
+                        
+                        # Use Hungarian algorithm or simple greedy matching for peak assignment
+                        from scipy.optimize import linear_sum_assignment
+                        try:
+                            row_indices, col_indices = linear_sum_assignment(distance_matrix)
+                            # Reorder current peaks to match previous peaks
+                            matched_peak_powers = current_peak_powers[row_indices]
+                            matched_peak_angles = current_peak_angles[row_indices]
+                        except ImportError:
+                            # Fallback to greedy matching if scipy not available
+                            matched_peak_powers = current_peak_powers.copy()
+                            matched_peak_angles = current_peak_angles.copy()
+                            used_indices = set()
+                            for i in range(len(prev_angles)):
+                                # Find closest unused peak
+                                distances = [np.abs(current_peak_angles[j] - prev_angles[i]) 
+                                           for j in range(len(current_peak_angles)) if j not in used_indices]
+                                if distances:
+                                    min_idx = np.argmin(distances)
+                                    actual_idx = [j for j in range(len(current_peak_angles)) if j not in used_indices][min_idx]
+                                    matched_peak_powers[i] = current_peak_powers[actual_idx]
+                                    matched_peak_angles[i] = current_peak_angles[actual_idx]
+                                    used_indices.add(actual_idx)
+                    else:
+                        # First epoch or different number of peaks
+                        matched_peak_powers = current_peak_powers
+                        matched_peak_angles = current_peak_angles
+                else:
+                    matched_peak_powers = np.array([])
+                    matched_peak_angles = np.array([])
         
         # Backward pass
         loss.backward()
+        
+        # Apply gradient clipping if specified
+        max_grad_norm = getattr(self.system_params, 'max_grad_norm', None)
+        if max_grad_norm is not None:
+            # Clip gradients for position parameters
+            if hasattr(self.algorithm, 'antenna_positions') and self.algorithm.antenna_positions.requires_grad:
+                torch.nn.utils.clip_grad_norm_([self.algorithm.antenna_positions], max_grad_norm)
+            
+            # Clip gradients for gain parameters  
+            if hasattr(self.algorithm, 'complex_gain') and self.algorithm.complex_gain.requires_grad:
+                torch.nn.utils.clip_grad_norm_([self.algorithm.complex_gain], max_grad_norm)
+        
+        # Compute gradient magnitudes for logging
+        position_grad_mag = 0.0
+        gain_grad_mag = 0.0
+        position_grad_max = 0.0
+        gain_grad_max = 0.0
+        
+        # Check if algorithm has learnable parameters and compute gradient magnitudes
+        if hasattr(self.algorithm, 'antenna_positions') and self.algorithm.antenna_positions.grad is not None:
+            position_grad_mag = torch.norm(self.algorithm.antenna_positions.grad).item()
+            position_grad_max = torch.max(torch.abs(self.algorithm.antenna_positions.grad)).item()
+        
+        if hasattr(self.algorithm, 'complex_gain') and self.algorithm.complex_gain.grad is not None:
+            gain_grad_mag = torch.norm(self.algorithm.complex_gain.grad).item()
+            # For complex gradients, we need to handle real and imaginary parts
+            gain_grad_max = torch.max(torch.abs(self.algorithm.complex_gain.grad)).item()
+        
+        # ENHANCED DIAGNOSTIC LOGGING
+        if getattr(self.system_params, 'gradients_debug', False):
+            # Initialize debug tracking variables if they don't exist
+            if not hasattr(self, '_debug_epoch_counter'):
+                self._debug_epoch_counter = 0
+                self._loss_history = []
+                self._grad_history = []
+            else:
+                self._debug_epoch_counter += 1
+            
+            # Log detailed info every 10 epochs when loss is very low or when gradients are high
+            should_log = (self._debug_epoch_counter % 10 == 0 and loss.item() < 0.01) or \
+                        (position_grad_mag > 0.1 or gain_grad_mag > 0.1) or \
+                        (self._debug_epoch_counter < 50 and self._debug_epoch_counter % 5 == 0)  # More frequent logging early on
+            
+            if should_log:
+                print(f"  DEBUG - Epoch {self._debug_epoch_counter}:")
+                print(f"    Loss: {loss.item():.8f}")
+                print(f"    Position grad norm: {position_grad_mag:.6f}, max: {position_grad_max:.6f}")
+                print(f"    Gain grad norm: {gain_grad_mag:.6f}, max: {gain_grad_max:.6f}")
+                print(f"    Position mean: {pos_mean_before:.4f}, std: {pos_std_before:.4f}")
+                print(f"    Gain mean mag: {gain_mean_mag_before:.4f}, std mag: {gain_std_mag_before:.4f}")
+                
+                # Print peak powers and their individual drift
+                if len(matched_peak_powers) > 0:
+                    print(f"    Peak powers: {matched_peak_powers}")
+                    print(f"    Peak angles (deg): {np.rad2deg(matched_peak_angles)}")
+                    
+                    # Calculate individual peak drift if we have previous data
+                    if hasattr(self, '_prev_peak_powers') and len(self._prev_peak_powers) == len(matched_peak_powers):
+                        peak_drifts = np.abs(matched_peak_powers - self._prev_peak_powers)
+                        print(f"    Peak power drifts: {peak_drifts}")
+                        print(f"    Max peak drift: {np.max(peak_drifts):.6f}, Mean peak drift: {np.mean(peak_drifts):.6f}")
+
+                # Check for potential parameter drift patterns
+                if hasattr(self, '_prev_pos_mean'):
+                    pos_drift = abs(pos_mean_before - self._prev_pos_mean)
+                    gain_drift = abs(gain_mean_mag_before - self._prev_gain_mean)
+                    print(f"    Parameter drift - Pos: {pos_drift:.6f}, Gain mag: {gain_drift:.6f}")
+                
+                # Store current values for next comparison
+                self._prev_pos_mean = pos_mean_before
+                self._prev_gain_mean = gain_mean_mag_before
+                if len(matched_peak_powers) > 0:
+                    self._prev_peak_powers = matched_peak_powers.copy()
+                    self._prev_peak_angles = matched_peak_angles.copy()
+                
+                # Check for gradient explosion warning
+                if position_grad_mag > 1.0 or gain_grad_mag > 1.0:
+                    print(f"    WARNING: Large gradients detected! Pos: {position_grad_mag:.4f}, Gain: {gain_grad_mag:.4f}")
+            
+            # Always update loss and gradient history for anomaly detection
+            self._loss_history.append(loss.item())
+            self._grad_history.append(position_grad_mag + gain_grad_mag)
+            
+            if len(self._loss_history) > 5:
+                # Keep only recent history
+                self._loss_history = self._loss_history[-5:]
+                self._grad_history = self._grad_history[-5:]
+                
+                recent_loss_std = np.std(self._loss_history)
+                recent_grad_trend = np.polyfit(range(5), self._grad_history, 1)[0]  # Linear trend
+                
+                if recent_loss_std < 1e-6 and recent_grad_trend > 0.001:
+                    if should_log:  # Only print if we're already logging this epoch
+                        print(f"    ANOMALY: Stable loss ({recent_loss_std:.8f}) with growing gradients (trend: {recent_grad_trend:.6f})")
+        
         self.optimizer.step()
         
-        return loss.item()
+        return loss.item(), position_grad_mag, gain_grad_mag
     
     def _run_evaluation(self) -> Dict[str, Any]:
         """
@@ -608,469 +794,55 @@ class DoARunner:
         
         if self.results is None:
             raise ValueError("No results available. Run the algorithm first.")
-        true_angles = torch.from_numpy(self.results['true_angles']).to(self.device)
 
         if "music" in self.system_params.model_type.lower() and self.system_params.plot_results:
-                    if self.algorithm.music_spectrum is None:
-                        raise ValueError("Music spectrum is None the algorithm hasn't runned yet.")
-                    self.algorithm.plot_spectrum(
-                        true_angles,
-                        path
-                    )
+            # Use DoARunner's method which gets data from self.results (best run)
+            self.plot_spectrum(path)
+            
         # Plot learned parameters (Figure 3 style) for diffMUSIC
-        if self.system_params.model_type.lower() == "diffmusic" and self.system_params.plot_results: # TODO: check with Ori
-            # Get physical parameters for comparison
-            physical_array = self.data_dict.get('physical_array', None)
-            physical_gains = self.data_dict.get('physical_antennas_gains', None)
-            
-            # Convert to torch tensors if they're numpy arrays
-            if physical_array is not None and not isinstance(physical_array, torch.Tensor):
-                physical_array = torch.from_numpy(physical_array)
-            if physical_gains is not None and not isinstance(physical_gains, torch.Tensor):
-                physical_gains = torch.from_numpy(physical_gains)
-            
-            # Create title based on loss type and performance
-            rmspe = self.results.get('rmspe', 0)
-            loss_type = getattr(self.system_params, 'loss_type', 'unknown')
-            title = f"Learned Parameters ({loss_type.upper()}) - RMSPE: {rmspe:.3f}°"
-            
-            self.algorithm.plot_learned_parameters(
-                true_positions=physical_array,
-                true_gains=physical_gains,
-                path_to_save=path,
-                title=title
-            )
+        if self.system_params.model_type.lower() == "diffmusic" and self.system_params.plot_results:
+            # Use DoARunner's method which gets data from self.results (best run)
+            self.plot_learned_parameters(path)
         return None
     
 
-    def run_multi_loss_spectrum_comparison(self, loss_functions: List[str]) -> Dict[str, Any]:
+
+    def _compute_parameter_l2_differences(self) -> tuple:
         """
-        Run the same experiment with multiple loss functions and collect spectra for comparison
+        Compute L2 differences between true and learned parameters
         
-        Args:
-            loss_functions: List of loss functions to compare (e.g., ['rmspe', 'spectrum', 'unsupervised'])
-            
         Returns:
-            Dictionary containing spectra and results for each loss function
+            tuple: (position_l2_diff, gain_l2_diff)
         """
-        print(f"Starting multi-loss spectrum comparison with {len(loss_functions)} loss functions...")
-        print(f"Loss functions: {loss_functions}")
-        
-        # Initialize results storage
-        spectra_results = {}
-        full_results = {}
-        execution_times = {}
-        
-        # Get window size for consistent comparison
-        window_size = getattr(self.system_params, 'softmax_window_size', 21)
-        if hasattr(window_size, '__len__'):
-            # If multiple window sizes, use the first one for comparison
-            window_size = window_size[0] if len(window_size) > 0 else 21
-        
-        # Run experiment for each loss function
-        for i, loss_function in enumerate(loss_functions):
-            print(f"\n{'='*50}")
-            print(f"Running with Loss Function: {loss_function} ({i+1}/{len(loss_functions)})")
-            print(f"{'='*50}")
-            
-            start_time = time.time()
-            
-            try:
-                # Create fresh algorithm instance with reset parameters
-                self.algorithm = self._create_fresh_algorithm(window_size)
-                
-                # Update system params for this loss function
-                original_loss_type = getattr(self.system_params, 'loss_type', None)
-                self.system_params.loss_type = loss_function
-                
-                # Setup fresh training components
-                if self._needs_training():
-                    self._setup_training()
-                    self._setup_wandb(window_size, trial_idx=i)
-                
-                # Run complete training + evaluation cycle
-                results = {}
-                if self._needs_training():
-                    train_results = self._run_training()
-                    results.update(train_results)
-                
-                eval_results = self._run_evaluation()
-                results.update(eval_results)
-                
-                # Store spectrum with proper dimension handling
-                spectrum = results.get('music_spectrum', None)
-                if spectrum is not None:
-                    # Ensure consistent storage format (remove batch dimension)
-                    if isinstance(spectrum, torch.Tensor):
-                        spectrum = spectrum.cpu().numpy()
-                    if spectrum.ndim == 2 and spectrum.shape[0] == 1:
-                        spectrum = spectrum.squeeze(0)  # Remove batch dimension
-                    elif spectrum.ndim == 2 and spectrum.shape[0] > 1:
-                        spectrum = spectrum[0]  # Take first batch element
-                    
-                    spectra_results[loss_function] = spectrum
-                else:
-                    spectra_results[loss_function] = None
-                
-                full_results[loss_function] = results
-                execution_times[loss_function] = time.time() - start_time
-                
-                print(f"  RMSPE: {results['rmspe']:.6f} (Time: {execution_times[loss_function]:.2f}s)")
-                
-                # Close wandb for this trial
-                self._close_wandb()
-                
-                # Restore original loss type
-                if original_loss_type is not None:
-                    self.system_params.loss_type = original_loss_type
-                    
-            except Exception as e:
-                print(f"  Error with {loss_function}: {e}")
-                import traceback
-                traceback.print_exc()  # Print full traceback for debugging
-                
-                # Store error results
-                spectra_results[loss_function] = None
-                full_results[loss_function] = {'error': str(e), 'rmspe': float('inf')}
-                execution_times[loss_function] = time.time() - start_time
-        
-        # Compile consolidated results
-        total_time = sum(execution_times.values())
-        consolidated_results = {
-            'comparison_type': 'multi_loss_spectrum',
-            'loss_functions': loss_functions,
-            'window_size_used': window_size,
-            'spectra': spectra_results,
-            'results': full_results,
-            'execution_times': execution_times,
-            'total_execution_time': total_time,
-            'shared_data': {
-                'angles_grid': self.algorithm.angles_grid.cpu().numpy() if hasattr(self.algorithm, 'angles_grid') else None,
-                'true_angles': self.data_dict['true_angles'].cpu().numpy() if isinstance(self.data_dict['true_angles'], torch.Tensor) else self.data_dict['true_angles'],
-                'system_params': self.system_params
-            }
-        }
-        
-        print(f"\nMulti-loss spectrum comparison completed in {total_time:.2f}s")
-        
-        # Store results for potential later use
-        self.multi_loss_results = consolidated_results
-        
-        return consolidated_results
-        
-    def plot_multi_loss_spectrum_comparison(self, multi_loss_results: Dict[str, Any], path: Path):
-        """
-        Plot spectra from multiple loss functions on the same figure
-        
-        Args:
-            multi_loss_results: Results from run_multi_loss_spectrum_comparison()
-            path: Path to save the plot
-        """
-        import matplotlib.pyplot as plt
-        import numpy as np
-        
-        if multi_loss_results is None:
-            raise ValueError("No multi-loss results available. Run run_multi_loss_spectrum_comparison() first.")
-        
-        # Extract data
-        loss_functions = multi_loss_results['loss_functions']
-        spectra = multi_loss_results['spectra']
-        results = multi_loss_results['results']
-        shared_data = multi_loss_results['shared_data']
-        
-        angles_grid = shared_data['angles_grid']
-        true_angles = shared_data['true_angles']
-        
-        if angles_grid is None:
-            print("Warning: No angles grid available for plotting")
-            return
-        
-        # Convert angles to degrees for plotting
-        angles_deg = np.rad2deg(angles_grid)
-        true_angles_deg = np.rad2deg(true_angles)
-        
-        # Create figure
-        plt.figure(figsize=(14, 8))
-        
-        # Define colors and line styles for different loss functions FIRST
-        colors = {'rmspe': 'blue', 'spectrum': 'red', 'unsupervised': 'green', 'physical': 'black'}
-        line_styles = {'rmspe': '-', 'spectrum': '--', 'unsupervised': '-.', 'physical': ':'}
-        default_colors = ['blue', 'red', 'green', 'orange', 'purple', 'brown']
-        default_styles = ['-', '--', '-.', ':', '-', '--']
-        
-        # Compute and plot physical parameters spectrum if available
-        physical_spectrum = self._compute_physical_spectrum()
-        if physical_spectrum is not None:
-            plt.plot(angles_deg, physical_spectrum, 
-                    color=colors['physical'], linestyle=line_styles['physical'], linewidth=3,
-                    label='Physical Parameters', alpha=0.8)
-        
-        # Plot spectrum for each loss function
-        for i, loss_function in enumerate(loss_functions):
-            spectrum = spectra.get(loss_function, None)
-            result = results.get(loss_function, {})
-            
-            if spectrum is not None and 'error' not in result:
-                # Handle spectrum dimensions - remove batch dimension if present
-                if isinstance(spectrum, np.ndarray):
-                    if spectrum.ndim == 2 and spectrum.shape[0] == 1:
-                        spectrum = spectrum.squeeze(0)  # Remove batch dimension (1, 481) -> (481,)
-                    elif spectrum.ndim == 2 and spectrum.shape[0] > 1:
-                        spectrum = spectrum[0]  # Take first batch element
-                elif isinstance(spectrum, torch.Tensor):
-                    spectrum = spectrum.cpu().numpy()
-                    if spectrum.ndim == 2 and spectrum.shape[0] == 1:
-                        spectrum = spectrum.squeeze(0)
-                    elif spectrum.ndim == 2 and spectrum.shape[0] > 1:
-                        spectrum = spectrum[0]
-                
-                # Ensure spectrum is 1D
-                if spectrum.ndim != 1:
-                    print(f"Warning: Unexpected spectrum shape for {loss_function}: {spectrum.shape}")
-                    continue
-                    
-                # Ensure angles_deg and spectrum have the same length
-                if len(angles_deg) != len(spectrum):
-                    print(f"Warning: Length mismatch for {loss_function}: angles={len(angles_deg)}, spectrum={len(spectrum)}")
-                    continue
-                
-                # Get color and style
-                color = colors.get(loss_function, default_colors[i % len(default_colors)])
-                style = line_styles.get(loss_function, default_styles[i % len(default_styles)])
-                
-                # Get RMSPE for label
-                rmspe = result.get('rmspe', float('inf'))
-                
-                # Plot spectrum
-                plt.plot(angles_deg, spectrum, 
-                        color=color, linestyle=style, linewidth=2,
-                        label=f'{loss_function.upper()} (RMSPE: {rmspe:.3f}°)')
-            else:
-                print(f"Warning: No valid spectrum for {loss_function}")
-        
-        # Add true angle markers
-        for i, true_angle in enumerate(true_angles_deg):
-            plt.axvline(x=true_angle, color='black', linestyle=':', alpha=0.7, 
-                    label='True DoA' if i == 0 else "")
-        
-        # Customize plot
-        plt.xlabel('Angle [degrees]', fontsize=12, fontweight='bold')
-        plt.ylabel('Spectrum Power', fontsize=12, fontweight='bold')
-        plt.title('Multi-Loss Function Spectrum Comparison', fontsize=14, fontweight='bold')
-        plt.grid(True, alpha=0.3)
-        plt.legend(fontsize=10)
-        
-        # Add system info as text
-        steering_mse_text = ", ".join([f"{lf}: {results[lf].get('steering_matrix_mse', float('nan')):.3f}" 
-                                  for lf in loss_functions if 'error' not in results.get(lf, {})])
-
-        info_text = (f"N={shared_data['system_params'].N}, "
-                    f"M={shared_data['system_params'].M}, "
-                    f"T={shared_data['system_params'].T}, "
-                    f"SNR={shared_data['system_params'].snr}dB\n"
-                    f"Steering MSE - {steering_mse_text}")
-        plt.text(0.02, 0.98, info_text, transform=plt.gca().transAxes, 
-                verticalalignment='top', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
-        
-        plt.tight_layout()
-        
-        # Save plot
-        save_path = path / "multi_loss_spectrum_comparison.png"
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        plt.savefig(path / "multi_loss_spectrum_comparison.pdf", bbox_inches='tight')
-        
-        print(f"Multi-loss spectrum comparison plot saved to: {save_path}")
-        plt.show()
-        
-
-    def plot_multi_loss_learned_parameters(self, multi_loss_results: Dict[str, Any], path: Path):
-        """
-        Plot learned parameters from multiple loss functions on the same figure
-        
-        Args:
-            multi_loss_results: Results from run_multi_loss_spectrum_comparison()
-            path: Path to save the plot
-        """
-        import matplotlib.pyplot as plt
-        import matplotlib.patches as patches
-        import numpy as np
-        
-        if multi_loss_results is None:
-            raise ValueError("No multi-loss results available. Run run_multi_loss_spectrum_comparison() first.")
-        
-        # Extract data
-        loss_functions = multi_loss_results['loss_functions']
-        results = multi_loss_results['results']
-        shared_data = multi_loss_results['shared_data']
-        
-        # Get physical parameters for comparison
+        # Get true parameters from data_dict
         true_positions = self.data_dict.get('physical_array', None)
         true_gains = self.data_dict.get('physical_antennas_gains', None)
         
-        # Convert to numpy if they're torch tensors
-        if true_positions is not None and isinstance(true_positions, torch.Tensor):
-            true_positions = true_positions.cpu().numpy()
-        if true_gains is not None and isinstance(true_gains, torch.Tensor):
-            true_gains = true_gains.cpu().numpy()
+        position_l2_diff = float('nan')
+        gain_l2_diff = float('nan')
         
-        # Create figure with appropriate height for all rows
-        num_loss_functions = len([lf for lf in loss_functions if 'error' not in results.get(lf, {})])
-        total_rows = num_loss_functions + (1 if true_positions is not None else 0)
-        fig, ax = plt.subplots(1, 1, figsize=(16, 3 + total_rows * 1.5))
-        
-        # Define colors for different loss functions
-        colors = {'rmspe': 'blue', 'spectrum': 'red', 'unsupervised': 'green'}
-        default_colors = ['blue', 'red', 'green', 'orange', 'purple', 'brown']
-        
-        # Y positions for different rows
-        row_spacing = 1.5
-        current_y = (total_rows - 1) * row_spacing / 2
-        
-        # Plot learned parameters for each loss function
-        plotted_loss_functions = []
-        for i, loss_function in enumerate(loss_functions):
-            result = results.get(loss_function, {})
+        # Compute position L2 difference
+        if true_positions is not None and hasattr(self.algorithm, 'antenna_positions'):
+            # Convert to torch tensor if needed and move to device
+            if not isinstance(true_positions, torch.Tensor):
+                true_positions = torch.from_numpy(true_positions)
+            true_positions = true_positions.to(self.device)
             
-            if 'error' in result:
-                print(f"Skipping {loss_function} due to error: {result['error']}")
-                continue
+            learned_positions = self.algorithm.antenna_positions
+            position_l2_diff = torch.norm(true_positions - learned_positions).item()
+        
+        # Compute gain L2 difference
+        if true_gains is not None and hasattr(self.algorithm, 'complex_gain'):
+            # Convert to torch tensor if needed and move to device
+            if not isinstance(true_gains, torch.Tensor):
+                true_gains = torch.from_numpy(true_gains)
+            true_gains = true_gains.to(self.device)
             
-            learned_positions = result.get('learned_antenna_positions', None)
-            learned_gains = result.get('learned_antennas_gains', None)
-            rmspe = result.get('rmspe', float('inf'))
-            
-            if learned_positions is None or learned_gains is None:
-                print(f"Warning: No learned parameters for {loss_function}")
-                continue
-            
-            # Convert positions to wavelength units for display
-            wavelength = shared_data['system_params'].wavelength
-            learned_positions_wl = learned_positions / (wavelength / 2)
-            
-            # Get color for this loss function
-            color = colors.get(loss_function, default_colors[i % len(default_colors)])
-            
-            # Plot learned parameters
-            for j, (pos, gain) in enumerate(zip(learned_positions_wl, learned_gains)):
-                # Circle radius represents gain magnitude
-                radius = abs(gain) * 0.2  # Smaller radius for multiple rows
-                
-                # Circle color and segment angle represent gain phase
-                phase = np.angle(gain)
-                
-                # Draw circle with color corresponding to loss function
-                circle = patches.Circle((pos, current_y), radius, 
-                                        facecolor=color, alpha=0.3,
-                                        edgecolor=color, 
-                                        linewidth=2,
-                                        label=f'{loss_function.upper()} (RMSPE: {rmspe:.3f}°)' if j == 0 else "")
-                ax.add_patch(circle)
-                
-                # Draw phase segment (line from center to edge)
-                segment_x = pos + radius * np.cos(phase)
-                segment_y = current_y + radius * np.sin(phase)
-                ax.plot([pos, segment_x], [current_y, segment_y], color=color, linewidth=2)
-                
-                # Add antenna number
-                if j == 0:  # Only add for first antenna to avoid clutter
-                    ax.text(pos - 0.3, current_y, f'{loss_function.upper()}', 
-                        ha='right', va='center', fontsize=10, fontweight='bold', color=color)
-            
-            # Add horizontal reference line
-            ax.axhline(y=current_y, color=color, linestyle=':', alpha=0.3, linewidth=1)
-            
-            plotted_loss_functions.append(loss_function)
-            current_y -= row_spacing
+            learned_gains = self.algorithm.complex_gain
+            gain_l2_diff = torch.norm(true_gains - learned_gains).item()
         
-        # Plot physical parameters if available (bottom row)
-        if true_positions is not None and true_gains is not None:
-            true_positions_wl = true_positions / (wavelength / 2)
-            
-            for j, (pos, gain) in enumerate(zip(true_positions_wl, true_gains)):
-                radius = abs(gain) * 0.2
-                phase = np.angle(gain)
-                
-                # Draw circle with different style for physical parameters
-                circle = patches.Circle((pos, current_y), radius, 
-                                        facecolor='lightgray', 
-                                        edgecolor='black', 
-                                        linewidth=2, 
-                                        alpha=0.7,
-                                        label='Physical' if j == 0 else "")
-                ax.add_patch(circle)
-                
-                # Draw phase segment
-                segment_x = pos + radius * np.cos(phase)
-                segment_y = current_y + radius * np.sin(phase)
-                ax.plot([pos, segment_x], [current_y, segment_y], 'k-', linewidth=2)
-            
-            # Add label for physical parameters
-            ax.text(true_positions_wl[0] - 0.3, current_y, 'PHYSICAL', 
-                ha='right', va='center', fontsize=10, fontweight='bold', color='black')
-            
-            # Add horizontal reference line
-            ax.axhline(y=current_y, color='black', linestyle=':', alpha=0.3, linewidth=1)
-        
-        # Set axis limits and labels
-        all_positions = []
-        for loss_function in plotted_loss_functions:
-            result = results.get(loss_function, {})
-            if 'learned_antenna_positions' in result:
-                positions_wl = result['learned_antenna_positions'] / (wavelength / 2)
-                all_positions.extend(positions_wl)
-        
-        if true_positions is not None:
-            all_positions.extend(true_positions_wl)
-        
-        if all_positions:
-            ax.set_xlim(min(all_positions) - 0.5, max(all_positions) + 0.5)
-        
-        y_range = total_rows * row_spacing / 2 + 0.8
-        ax.set_ylim(-y_range, y_range)
-        ax.set_xlabel('x [λ/2]', fontsize=12, fontweight='bold')
-        ax.set_ylabel('')
-        
-        # Create title with summary
-        rmspe_summary = ', '.join([f"{lf.upper()}: {results[lf]['rmspe']:.3f}°" 
-                                for lf in plotted_loss_functions])
-        title = f'Multi-Loss Learned Parameters Comparison\n{rmspe_summary}'
-        ax.set_title(title, fontsize=14, fontweight='bold')
-        
-        ax.grid(True, alpha=0.3)
-        
-        # Create custom legend
-        legend_elements = []
-        for i, loss_function in enumerate(plotted_loss_functions):
-            color = colors.get(loss_function, default_colors[i % len(default_colors)])
-            rmspe = results[loss_function]['rmspe']
-            legend_elements.append(
-                plt.Line2D([0], [0], marker='o', color='w', markerfacecolor=color, 
-                        markersize=10, markeredgecolor=color, markeredgewidth=2, 
-                        alpha=0.7, label=f'{loss_function.upper()} (RMSPE: {rmspe:.3f}°)')
-            )
-        
-        if true_positions is not None:
-            legend_elements.append(
-                plt.Line2D([0], [0], marker='o', color='w', markerfacecolor='lightgray', 
-                        markersize=10, markeredgecolor='black', markeredgewidth=2, 
-                        alpha=0.7, label='Physical')
-            )
-        
-        ax.legend(handles=legend_elements, loc='upper right', fontsize=10)
-        
-        # Remove y-axis ticks for cleaner look
-        ax.set_yticks([])
-        
-        plt.tight_layout()
-        
-        # Save plot
-        save_path = path / "multi_loss_learned_parameters.png"
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        plt.savefig(path / "multi_loss_learned_parameters.pdf", bbox_inches='tight')
-        
-        print(f"Multi-loss learned parameters plot saved to: {save_path}")
-        plt.show()
-
+        return position_l2_diff, gain_l2_diff
+    
 
     def _compute_steering_matrix_mse(self, true_angles: torch.Tensor) -> float:
         """
@@ -1104,63 +876,785 @@ class DoARunner:
         return mse.item()
     
 
-    def _compute_physical_spectrum(self) -> Optional[np.ndarray]:
+    def plot_spectrum(self, path: Path):
         """
-        Compute MUSIC spectrum using physical parameters for comparison
+        Plot MUSIC spectrum using data from self.results (from best window size run)
+        This is the parent method that creates the canvas and calls internal plotting methods
         
-        Returns:
-            Physical spectrum as numpy array, or None if physical parameters not available
+        Args:
+            path: Path to save the plot
         """
-        # Check if physical parameters are available
+        
+        if self.results is None:
+            raise ValueError("No results available. Run the algorithm first.")
+        
+        # Check if we should plot physical spectrum comparison
+        plot_physical_spectrum = getattr(self.system_params, 'plot_physical_spectrum', False)
+        
+        # Get spectrum and angles grid from results (best run)
+        music_spectrum = self.results.get('music_spectrum', None)
+        angles_grid = self.results.get('angles_grid', None)
+        true_angles = self.results.get('true_angles', None)
+        estimated_angles = self.results.get('estimated_angles', None)
+        
+        if music_spectrum is None or angles_grid is None:
+            print("Warning: No spectrum data found in results")
+            return
+        
+        # Create figure and axis - this is the parent canvas
+        fig, ax = plt.subplots(1, 1, figsize=(12, 7))
+        
+        # Plot the main result spectrum
+        self._plot_result_spectrum(ax, music_spectrum, angles_grid, true_angles, estimated_angles)
+        
+        # Plot physical spectrum if requested and available for diffMUSIC
+        if plot_physical_spectrum and self.system_params.model_type.lower() == "diffmusic":
+            self._plot_physical_diffmusic_spectrum(ax, path)
+        
+        # Finalize plot
+        ax.set_xlabel('Angle [degrees]', fontsize=12, fontweight='bold')
+        ax.set_ylabel('Spectrum Power', fontsize=12, fontweight='bold')
+        
+        # Create title with performance info
+        rmspe = self.results.get('rmspe', 0)
+        loss_type = getattr(self.system_params, 'loss_type', 'unknown')
+        window_size = self.results.get('optimal_window_size', 'unknown')
+        title = f"{self.system_params.model_type} Spectrum ({loss_type.upper()}) - RMSPE: {rmspe:.6f}°, Window Size: {window_size}"
+        if plot_physical_spectrum:
+            title += " with Physical Parameters Comparison"
+        ax.set_title(title, fontsize=14, fontweight='bold')
+        
+        ax.grid(True, alpha=0.3)
+        ax.legend(fontsize=10)
+        plt.tight_layout()
+        
+        # Save plot
+        save_path = path / "spectrum.png"
+        plt.savefig(save_path, dpi=300)
+        print(f"Spectrum plot saved to: {save_path}")
+        plt.show()
+
+    def _plot_result_spectrum(self, ax, music_spectrum, angles_grid, true_angles, estimated_angles):
+        """
+        Plot the learned/result MUSIC spectrum on the given axis
+        
+        Args:
+            ax: Matplotlib axis to plot on
+            music_spectrum: MUSIC spectrum data from best run
+            angles_grid: Angles grid for x-axis
+            true_angles: True DoA angles
+            estimated_angles: Estimated DoA angles
+        """
+        # Handle spectrum dimensions - remove batch dimension if present
+        if isinstance(music_spectrum, np.ndarray):
+            if music_spectrum.ndim == 2 and music_spectrum.shape[0] == 1:
+                music_spectrum = music_spectrum.squeeze(0)  # Remove batch dimension
+            elif music_spectrum.ndim == 2 and music_spectrum.shape[0] > 1:
+                music_spectrum = music_spectrum[0]  # Take first batch element
+        
+        # Convert to degrees for plotting
+        angles_deg = np.rad2deg(angles_grid)
+        
+        # Plot the main spectrum
+        ax.plot(angles_deg, music_spectrum, 'b-', linewidth=2, 
+                label=f'{self.system_params.model_type} Spectrum (Learned)')
+        
+        # Add true angle markers if available
+        if true_angles is not None:
+            true_angles_deg = np.rad2deg(true_angles)
+            for i, angle in enumerate(true_angles_deg):
+                ax.axvline(x=angle, color='r', linestyle='--', alpha=0.7, 
+                          label='True DoA' if i == 0 else "")
+        
+        # Add estimated angle markers if available
+        if estimated_angles is not None:
+            estimated_angles_deg = np.rad2deg(estimated_angles)
+            for i, angle in enumerate(estimated_angles_deg):
+                ax.axvline(x=angle, color='g', linestyle=':', alpha=0.7, 
+                          label='Estimated DoA' if i == 0 else "")
+
+    def _plot_physical_diffmusic_spectrum(self, ax, path: Path):
+        """
+        Plot diffMUSIC spectrum using actual physical parameters for comparison
+        
+        Args:
+            ax: Matplotlib axis to plot on
+            path: Path for potential debugging/saving
+        """
+        try:
+            # Get physical parameters from data
+            physical_array = self.data_dict.get('physical_array', None)
+            physical_gains = self.data_dict.get('physical_antennas_gains', None)
+            measurements = self.data_dict.get('measurements', None)
+            
+            if physical_array is None or physical_gains is None or measurements is None:
+                print("Warning: Physical parameters or measurements not available for comparison spectrum")
+                return
+            
+            # Import diffMUSIC here to avoid circular imports
+            from src.diffmusic import DiffMUSIC
+            
+            # Create covariance matrix from measurements
+            cov_matrix = sample_covariance(measurements)
+            
+            # Create a new diffMUSIC instance with physical parameters
+            physical_diffmusic = DiffMUSIC(self.system_params, self.system_params.N, 
+                                         physical_array=physical_array, 
+                                         physical_gains=physical_gains)
+            
+            # Set to training mode to use diffMUSIC (soft peak finding) even during evaluation
+            physical_diffmusic.train()
+            
+            # Move to same device as current model if available
+            if hasattr(self.algorithm, 'device'):
+                physical_diffmusic = physical_diffmusic.to(self.algorithm.device)
+                device = self.algorithm.device
+            else:
+                device = torch.device('cpu')
+            
+            # Set physical parameters
+            with torch.no_grad():
+                if isinstance(physical_array, np.ndarray):
+                    physical_array = torch.from_numpy(physical_array).to(torch.float64)
+                if isinstance(physical_gains, np.ndarray):
+                    physical_gains = torch.from_numpy(physical_gains).to(torch.complex64)
+                    
+                physical_diffmusic.antenna_positions.copy_(physical_array.to(device))
+                physical_diffmusic.complex_gain.copy_(physical_gains.to(device))
+            
+            # Run forward pass to compute spectrum
+            with torch.no_grad():
+                # Ensure covariance matrix has batch dimension
+                if cov_matrix.dim() == 2:
+                    cov_matrix = cov_matrix.unsqueeze(0)  # Add batch dimension
+                
+                # Call the model (which automatically calls forward) to populate its music spectrum
+                _ = physical_diffmusic(cov_matrix.to(device), self.system_params.M)
+            
+            # Extract and plot the physical spectrum
+            if physical_diffmusic.music_spectrum is not None:
+                angles_deg = torch.rad2deg(physical_diffmusic.angles_grid).cpu().numpy()
+                physical_spectrum = physical_diffmusic.music_spectrum[0].cpu().detach().numpy()  # Take first batch
+                
+                ax.plot(angles_deg, physical_spectrum, 'k:', linewidth=3, alpha=0.8,
+                        label='diffMUSIC Spectrum (Physical Parameters)')
+                print("Physical parameters spectrum plotted successfully")
+            else:
+                print("Warning: Failed to compute physical parameters spectrum")
+                
+        except Exception as e:
+            print(f"Warning: Error computing physical spectrum: {e}")
+            import traceback
+            traceback.print_exc()
+
+    def plot_learned_parameters(self, path: Path):
+        """
+        Plot learned parameters using data from self.results (from best window size run)
+        
+        Args:
+            path: Path to save the plot
+        """
+        
+        if self.results is None:
+            raise ValueError("No results available. Run the algorithm first.")
+        
+        # Get learned parameters from results (best run)
+        learned_positions = self.results.get('learned_antenna_positions', None)
+        learned_gains = self.results.get('learned_antennas_gains', None)
+        
+        if learned_positions is None or learned_gains is None:
+            print("Warning: No learned parameters found in results")
+            return
+        
+        # Get physical parameters for comparison
         physical_array = self.data_dict.get('physical_array', None)
         physical_gains = self.data_dict.get('physical_antennas_gains', None)
         
-        if physical_array is None or physical_gains is None:
-            print("Warning: Physical parameters not available for spectrum computation")
-            return None
+        # Convert to numpy if they're torch tensors
+        if physical_array is not None and isinstance(physical_array, torch.Tensor):
+            physical_array = physical_array.cpu().numpy()
+        if physical_gains is not None and isinstance(physical_gains, torch.Tensor):
+            physical_gains = physical_gains.cpu().numpy()
         
-        try:
-            # Convert to torch tensors if needed
-            if not isinstance(physical_array, torch.Tensor):
-                physical_array = torch.from_numpy(physical_array)
-            if not isinstance(physical_gains, torch.Tensor):
-                physical_gains = torch.from_numpy(physical_gains)
+        # Create figure
+        fig, ax = plt.subplots(1, 1, figsize=(16, 6))
+        
+        # Convert positions to wavelength units for display
+        wavelength = self.system_params.wavelength
+        learned_positions_wl = learned_positions / (wavelength / 2)
+        
+        # Plot learned parameters (top row)
+        y_learned = 1
+        for j, (pos, gain) in enumerate(zip(learned_positions_wl, learned_gains)):
+            # Circle radius represents gain magnitude
+            radius = abs(gain) * 0.3
             
-            # Move to device
-            physical_array = physical_array.to(self.device).to(torch.float64)
-            physical_gains = physical_gains.to(self.device).to(torch.complex64)
+            # Circle color and segment angle represent gain phase
+            phase = np.angle(gain)
             
-            # Check if noise subspace is available from the algorithm
-            if not hasattr(self.algorithm, 'noise_subspace') or self.algorithm.noise_subspace is None:
-                print("Warning: No noise subspace available for physical spectrum computation")
-                return None
+            # Draw circle
+            circle = patches.Circle((pos, y_learned), radius, 
+                                    facecolor='blue', alpha=0.3,
+                                    edgecolor='blue', 
+                                    linewidth=2,
+                                    label='Learned' if j == 0 else "")
+            ax.add_patch(circle)
             
-            # Save current learned parameters
-            with torch.no_grad():
-                current_positions = self.algorithm.antenna_positions.clone()
-                current_gains = self.algorithm.complex_gain.clone()
+            # Draw phase segment (line from center to edge)
+            segment_x = pos + radius * np.cos(phase)
+            segment_y = y_learned + radius * np.sin(phase)
+            ax.plot([pos, segment_x], [y_learned, segment_y], 'b-', linewidth=2)
+        
+        # Add label for learned parameters
+        ax.text(learned_positions_wl[0] - 0.5, y_learned, 'LEARNED', 
+            ha='right', va='center', fontsize=12, fontweight='bold', color='blue')
+        
+        # Plot physical parameters if available (bottom row)
+        if physical_array is not None and physical_gains is not None:
+            physical_positions_wl = physical_array / (wavelength / 2)
+            y_physical = -1
+            
+            for j, (pos, gain) in enumerate(zip(physical_positions_wl, physical_gains)):
+                radius = abs(gain) * 0.3
+                phase = np.angle(gain)
                 
-                # Temporarily set to physical parameters
-                self.algorithm.antenna_positions.copy_(physical_array)
-                self.algorithm.complex_gain.copy_(physical_gains)
+                # Draw circle
+                circle = patches.Circle((pos, y_physical), radius, 
+                                        facecolor='lightgray', 
+                                        edgecolor='black', 
+                                        linewidth=2, 
+                                        alpha=0.7,
+                                        label='Physical' if j == 0 else "")
+                ax.add_patch(circle)
                 
-                # Compute spectrum using physical parameters
-                inverse_spectrum = self.algorithm._compute_inverse_spectrum(self.algorithm.noise_subspace)
-                physical_spectrum = 1 / (inverse_spectrum + 1e-10)
-                
-                # Remove batch dimension and convert to numpy
-                if physical_spectrum.dim() == 2 and physical_spectrum.shape[0] == 1:
-                    physical_spectrum = physical_spectrum.squeeze(0)
-                physical_spectrum = physical_spectrum.cpu().detach().numpy()
-                
-                # Restore learned parameters
-                self.algorithm.antenna_positions.copy_(current_positions)
-                self.algorithm.complex_gain.copy_(current_gains)
+                # Draw phase segment
+                segment_x = pos + radius * np.cos(phase)
+                segment_y = y_physical + radius * np.sin(phase)
+                ax.plot([pos, segment_x], [y_physical, segment_y], 'k-', linewidth=2)
             
-            return physical_spectrum
+            # Add label for physical parameters
+            ax.text(physical_positions_wl[0] - 0.5, y_physical, 'PHYSICAL', 
+                ha='right', va='center', fontsize=12, fontweight='bold', color='black')
+        
+        # Set axis limits and labels
+        all_positions = list(learned_positions_wl)
+        if physical_array is not None:
+            all_positions.extend(physical_positions_wl)
+        
+        ax.set_xlim(min(all_positions) - 1, max(all_positions) + 1)
+        ax.set_ylim(-2, 2)
+        ax.set_xlabel('x [λ/2]', fontsize=12, fontweight='bold')
+        ax.set_ylabel('')
+        
+        # Create title with performance info
+        rmspe = self.results.get('rmspe', 0)
+        loss_type = getattr(self.system_params, 'loss_type', 'unknown')
+        steering_mse = self.results.get('steering_matrix_mse', float('nan'))
+        title = f"Learned Parameters ({loss_type.upper()}) - RMSPE: {rmspe:.6f}°, Steering MSE: {steering_mse:.6f}"
+        ax.set_title(title, fontsize=14, fontweight='bold')
+        
+        ax.grid(True, alpha=0.3)
+        ax.legend(fontsize=12)
+        
+        # Remove y-axis ticks for cleaner look
+        ax.set_yticks([])
+        
+        plt.tight_layout()
+        
+        # Save plot
+        save_path = path / "learned_parameters.png"
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        plt.savefig(path / "learned_parameters.pdf", bbox_inches='tight')
+        
+        print(f"Learned parameters plot saved to: {save_path}")
+        plt.show()
+
+
+    ###################### ARCHIVE: Sheli's implementation ###############
+
+    # def _compute_physical_spectrum(self) -> Optional[np.ndarray]:
+    #     """
+    #     Compute MUSIC spectrum using physical parameters for comparison
+        
+    #     Returns:
+    #         Physical spectrum as numpy array, or None if physical parameters not available
+    #     """
+    #     # Check if physical parameters are available
+    #     physical_array = self.data_dict.get('physical_array', None)
+    #     physical_gains = self.data_dict.get('physical_antennas_gains', None)
+        
+    #     if physical_array is None or physical_gains is None:
+    #         print("Warning: Physical parameters not available for spectrum computation")
+    #         return None
+        
+    #     try:
+    #         # Convert to torch tensors if needed
+    #         if not isinstance(physical_array, torch.Tensor):
+    #             physical_array = torch.from_numpy(physical_array)
+    #         if not isinstance(physical_gains, torch.Tensor):
+    #             physical_gains = torch.from_numpy(physical_gains)
             
-        except Exception as e:
-            print(f"Error computing physical spectrum: {e}")
-            import traceback
-            traceback.print_exc()  # This will help debug any remaining issues
-            return None
+    #         # Move to device
+    #         physical_array = physical_array.to(self.device).to(torch.float64)
+    #         physical_gains = physical_gains.to(self.device).to(torch.complex64)
+            
+    #         # Check if noise subspace is available from the algorithm
+    #         if not hasattr(self.algorithm, 'noise_subspace') or self.algorithm.noise_subspace is None:
+    #             print("Warning: No noise subspace available for physical spectrum computation")
+    #             return None
+            
+    #         # Save current learned parameters
+    #         with torch.no_grad():
+    #             current_positions = self.algorithm.antenna_positions.clone()
+    #             current_gains = self.algorithm.complex_gain.clone()
+                
+    #             # Temporarily set to physical parameters
+    #             self.algorithm.antenna_positions.copy_(physical_array)
+    #             self.algorithm.complex_gain.copy_(physical_gains)
+                
+    #             # Compute spectrum using physical parameters
+    #             inverse_spectrum = self.algorithm._compute_inverse_spectrum(self.algorithm.noise_subspace)
+    #             physical_spectrum = 1 / (inverse_spectrum + 1e-10)
+                
+    #             # Remove batch dimension and convert to numpy
+    #             if physical_spectrum.dim() == 2 and physical_spectrum.shape[0] == 1:
+    #                 physical_spectrum = physical_spectrum.squeeze(0)
+    #             physical_spectrum = physical_spectrum.cpu().detach().numpy()
+                
+    #             # Restore learned parameters
+    #             self.algorithm.antenna_positions.copy_(current_positions)
+    #             self.algorithm.complex_gain.copy_(current_gains)
+            
+    #         return physical_spectrum
+            
+    #     except Exception as e:
+    #         print(f"Error computing physical spectrum: {e}")
+    #         import traceback
+    #         traceback.print_exc()  # This will help debug any remaining issues
+    #         return None
+
+#     def run_multi_loss_spectrum_comparison(self, loss_functions: List[str]) -> Dict[str, Any]:
+#     """
+#     Run the same experiment with multiple loss functions and collect spectra for comparison
+    
+#     Args:
+#         loss_functions: List of loss functions to compare (e.g., ['rmspe', 'spectrum', 'unsupervised'])
+        
+#     Returns:
+#         Dictionary containing spectra and results for each loss function
+#     """
+#     print(f"Starting multi-loss spectrum comparison with {len(loss_functions)} loss functions...")
+#     print(f"Loss functions: {loss_functions}")
+    
+#     # Initialize results storage
+#     spectra_results = {}
+#     full_results = {}
+#     execution_times = {}
+    
+#     # Get window size for consistent comparison
+#     window_size = getattr(self.system_params, 'softmax_window_size', 21)
+#     if hasattr(window_size, '__len__'):
+#         # If multiple window sizes, use the first one for comparison
+#         window_size = window_size[0] if len(window_size) > 0 else 21
+    
+#     # Run experiment for each loss function
+#     for i, loss_function in enumerate(loss_functions):
+#         print(f"\n{'='*50}")
+#         print(f"Running with Loss Function: {loss_function} ({i+1}/{len(loss_functions)})")
+#         print(f"{'='*50}")
+        
+#         start_time = time.time()
+        
+#         try:
+#             # Create fresh algorithm instance with reset parameters
+#             self.algorithm = self._create_fresh_algorithm(window_size)
+            
+#             # Update system params for this loss function
+#             original_loss_type = getattr(self.system_params, 'loss_type', None)
+#             self.system_params.loss_type = loss_function
+            
+#             # Setup fresh training components
+#             if self._needs_training():
+#                 self._setup_training()
+#                 self._setup_wandb(window_size, trial_idx=i)
+            
+#             # Run complete training + evaluation cycle
+#             results = {}
+#             if self._needs_training():
+#                 train_results = self._run_training()
+#                 results.update(train_results)
+            
+#             eval_results = self._run_evaluation()
+#             results.update(eval_results)
+            
+#             # Store spectrum with proper dimension handling
+#             spectrum = results.get('music_spectrum', None)
+#             if spectrum is not None:
+#                 # Ensure consistent storage format (remove batch dimension)
+#                 if isinstance(spectrum, torch.Tensor):
+#                     spectrum = spectrum.cpu().numpy()
+#                 if spectrum.ndim == 2 and spectrum.shape[0] == 1:
+#                     spectrum = spectrum.squeeze(0)  # Remove batch dimension
+#                 elif spectrum.ndim == 2 and spectrum.shape[0] > 1:
+#                     spectrum = spectrum[0]  # Take first batch element
+                
+#                 spectra_results[loss_function] = spectrum
+#             else:
+#                 spectra_results[loss_function] = None
+            
+#             full_results[loss_function] = results
+#             execution_times[loss_function] = time.time() - start_time
+            
+#             print(f"  RMSPE: {results['rmspe']:.6f} (Time: {execution_times[loss_function]:.2f}s)")
+            
+#             # Close wandb for this trial
+#             self._close_wandb()
+            
+#             # Restore original loss type
+#             if original_loss_type is not None:
+#                 self.system_params.loss_type = original_loss_type
+                
+#         except Exception as e:
+#             print(f"  Error with {loss_function}: {e}")
+#             import traceback
+#             traceback.print_exc()  # Print full traceback for debugging
+            
+#             # Store error results
+#             spectra_results[loss_function] = None
+#             full_results[loss_function] = {'error': str(e), 'rmspe': float('inf')}
+#             execution_times[loss_function] = time.time() - start_time
+    
+#     # Compile consolidated results
+#     total_time = sum(execution_times.values())
+#     consolidated_results = {
+#         'comparison_type': 'multi_loss_spectrum',
+#         'loss_functions': loss_functions,
+#         'window_size_used': window_size,
+#         'spectra': spectra_results,
+#         'results': full_results,
+#         'execution_times': execution_times,
+#         'total_execution_time': total_time,
+#         'shared_data': {
+#             'angles_grid': self.algorithm.angles_grid.cpu().numpy() if hasattr(self.algorithm, 'angles_grid') else None,
+#             'true_angles': self.data_dict['true_angles'].cpu().numpy() if isinstance(self.data_dict['true_angles'], torch.Tensor) else self.data_dict['true_angles'],
+#             'system_params': self.system_params
+#         }
+#     }
+    
+#     print(f"\nMulti-loss spectrum comparison completed in {total_time:.2f}s")
+    
+#     # Store results for potential later use
+#     self.multi_loss_results = consolidated_results
+    
+#     return consolidated_results
+    
+# def plot_multi_loss_spectrum_comparison(self, multi_loss_results: Dict[str, Any], path: Path):
+#     """
+#     Plot spectra from multiple loss functions on the same figure
+    
+#     Args:
+#         multi_loss_results: Results from run_multi_loss_spectrum_comparison()
+#         path: Path to save the plot
+#     """
+#     import matplotlib.pyplot as plt
+#     import numpy as np
+    
+#     if multi_loss_results is None:
+#         raise ValueError("No multi-loss results available. Run run_multi_loss_spectrum_comparison() first.")
+    
+#     # Extract data
+#     loss_functions = multi_loss_results['loss_functions']
+#     spectra = multi_loss_results['spectra']
+#     results = multi_loss_results['results']
+#     shared_data = multi_loss_results['shared_data']
+    
+#     angles_grid = shared_data['angles_grid']
+#     true_angles = shared_data['true_angles']
+    
+#     if angles_grid is None:
+#         print("Warning: No angles grid available for plotting")
+#         return
+    
+#     # Convert angles to degrees for plotting
+#     angles_deg = np.rad2deg(angles_grid)
+#     true_angles_deg = np.rad2deg(true_angles)
+    
+#     # Create figure
+#     plt.figure(figsize=(14, 8))
+    
+#     # Define colors and line styles for different loss functions FIRST
+#     colors = {'rmspe': 'blue', 'spectrum': 'red', 'unsupervised': 'green', 'physical': 'black'}
+#     line_styles = {'rmspe': '-', 'spectrum': '--', 'unsupervised': '-.', 'physical': ':'}
+#     default_colors = ['blue', 'red', 'green', 'orange', 'purple', 'brown']
+#     default_styles = ['-', '--', '-.', ':', '-', '--']
+    
+#     # Compute and plot physical parameters spectrum if available
+#     physical_spectrum = self._compute_physical_spectrum()
+#     if physical_spectrum is not None:
+#         plt.plot(angles_deg, physical_spectrum, 
+#                 color=colors['physical'], linestyle=line_styles['physical'], linewidth=3,
+#                 label='Physical Parameters', alpha=0.8)
+    
+#     # Plot spectrum for each loss function
+#     for i, loss_function in enumerate(loss_functions):
+#         spectrum = spectra.get(loss_function, None)
+#         result = results.get(loss_function, {})
+        
+#         if spectrum is not None and 'error' not in result:
+#             # Handle spectrum dimensions - remove batch dimension if present
+#             if isinstance(spectrum, np.ndarray):
+#                 if spectrum.ndim == 2 and spectrum.shape[0] == 1:
+#                     spectrum = spectrum.squeeze(0)  # Remove batch dimension (1, 481) -> (481,)
+#                 elif spectrum.ndim == 2 and spectrum.shape[0] > 1:
+#                     spectrum = spectrum[0]  # Take first batch element
+#             elif isinstance(spectrum, torch.Tensor):
+#                 spectrum = spectrum.cpu().numpy()
+#                 if spectrum.ndim == 2 and spectrum.shape[0] == 1:
+#                     spectrum = spectrum.squeeze(0)
+#                 elif spectrum.ndim == 2 and spectrum.shape[0] > 1:
+#                     spectrum = spectrum[0]
+            
+#             # Ensure spectrum is 1D
+#             if spectrum.ndim != 1:
+#                 print(f"Warning: Unexpected spectrum shape for {loss_function}: {spectrum.shape}")
+#                 continue
+                
+#             # Ensure angles_deg and spectrum have the same length
+#             if len(angles_deg) != len(spectrum):
+#                 print(f"Warning: Length mismatch for {loss_function}: angles={len(angles_deg)}, spectrum={len(spectrum)}")
+#                 continue
+            
+#             # Get color and style
+#             color = colors.get(loss_function, default_colors[i % len(default_colors)])
+#             style = line_styles.get(loss_function, default_styles[i % len(default_styles)])
+            
+#             # Get RMSPE for label
+#             rmspe = result.get('rmspe', float('inf'))
+            
+#             # Plot spectrum
+#             plt.plot(angles_deg, spectrum, 
+#                     color=color, linestyle=style, linewidth=2,
+#                     label=f'{loss_function.upper()} (RMSPE: {rmspe:.3f}°)')
+#         else:
+#             print(f"Warning: No valid spectrum for {loss_function}")
+    
+#     # Add true angle markers
+#     for i, true_angle in enumerate(true_angles_deg):
+#         plt.axvline(x=true_angle, color='black', linestyle=':', alpha=0.7, 
+#                 label='True DoA' if i == 0 else "")
+    
+#     # Customize plot
+#     plt.xlabel('Angle [degrees]', fontsize=12, fontweight='bold')
+#     plt.ylabel('Spectrum Power', fontsize=12, fontweight='bold')
+#     plt.title('Multi-Loss Function Spectrum Comparison', fontsize=14, fontweight='bold')
+#     plt.grid(True, alpha=0.3)
+#     plt.legend(fontsize=10)
+    
+#     # Add system info as text
+#     steering_mse_text = ", ".join([f"{lf}: {results[lf].get('steering_matrix_mse', float('nan')):.3f}" 
+#                                 for lf in loss_functions if 'error' not in results.get(lf, {})])
+
+#     info_text = (f"N={shared_data['system_params'].N}, "
+#                 f"M={shared_data['system_params'].M}, "
+#                 f"T={shared_data['system_params'].T}, "
+#                 f"SNR={shared_data['system_params'].snr}dB\n"
+#                 f"Steering MSE - {steering_mse_text}")
+#     plt.text(0.02, 0.98, info_text, transform=plt.gca().transAxes, 
+#             verticalalignment='top', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+    
+#     plt.tight_layout()
+    
+#     # Save plot
+#     save_path = path / "multi_loss_spectrum_comparison.png"
+#     plt.savefig(save_path, dpi=300, bbox_inches='tight')
+#     plt.savefig(path / "multi_loss_spectrum_comparison.pdf", bbox_inches='tight')
+    
+#     print(f"Multi-loss spectrum comparison plot saved to: {save_path}")
+#     plt.show()
+    
+
+# def plot_multi_loss_learned_parameters(self, multi_loss_results: Dict[str, Any], path: Path):
+#     """
+#     Plot learned parameters from multiple loss functions on the same figure
+    
+#     Args:
+#         multi_loss_results: Results from run_multi_loss_spectrum_comparison()
+#         path: Path to save the plot
+#     """
+
+    
+#     if multi_loss_results is None:
+#         raise ValueError("No multi-loss results available. Run run_multi_loss_spectrum_comparison() first.")
+    
+#     # Extract data
+#     loss_functions = multi_loss_results['loss_functions']
+#     results = multi_loss_results['results']
+#     shared_data = multi_loss_results['shared_data']
+    
+#     # Get physical parameters for comparison
+#     true_positions = self.data_dict.get('physical_array', None)
+#     true_gains = self.data_dict.get('physical_antennas_gains', None)
+    
+#     # Convert to numpy if they're torch tensors
+#     if true_positions is not None and isinstance(true_positions, torch.Tensor):
+#         true_positions = true_positions.cpu().numpy()
+#     if true_gains is not None and isinstance(true_gains, torch.Tensor):
+#         true_gains = true_gains.cpu().numpy()
+    
+#     # Create figure with appropriate height for all rows
+#     num_loss_functions = len([lf for lf in loss_functions if 'error' not in results.get(lf, {})])
+#     total_rows = num_loss_functions + (1 if true_positions is not None else 0)
+#     fig, ax = plt.subplots(1, 1, figsize=(16, 3 + total_rows * 1.5))
+    
+#     # Define colors for different loss functions
+#     colors = {'rmspe': 'blue', 'spectrum': 'red', 'unsupervised': 'green'}
+#     default_colors = ['blue', 'red', 'green', 'orange', 'purple', 'brown']
+    
+#     # Y positions for different rows
+#     row_spacing = 1.5
+#     current_y = (total_rows - 1) * row_spacing / 2
+    
+#     # Plot learned parameters for each loss function
+#     plotted_loss_functions = []
+#     for i, loss_function in enumerate(loss_functions):
+#         result = results.get(loss_function, {})
+        
+#         if 'error' in result:
+#             print(f"Skipping {loss_function} due to error: {result['error']}")
+#             continue
+        
+#         learned_positions = result.get('learned_antenna_positions', None)
+#         learned_gains = result.get('learned_antennas_gains', None)
+#         rmspe = result.get('rmspe', float('inf'))
+        
+#         if learned_positions is None or learned_gains is None:
+#             print(f"Warning: No learned parameters for {loss_function}")
+#             continue
+        
+#         # Convert positions to wavelength units for display
+#         wavelength = shared_data['system_params'].wavelength
+#         learned_positions_wl = learned_positions / (wavelength / 2)
+        
+#         # Get color for this loss function
+#         color = colors.get(loss_function, default_colors[i % len(default_colors)])
+        
+#         # Plot learned parameters
+#         for j, (pos, gain) in enumerate(zip(learned_positions_wl, learned_gains)):
+#             # Circle radius represents gain magnitude
+#             radius = abs(gain) * 0.2  # Smaller radius for multiple rows
+            
+#             # Circle color and segment angle represent gain phase
+#             phase = np.angle(gain)
+            
+#             # Draw circle with color corresponding to loss function
+#             circle = patches.Circle((pos, current_y), radius, 
+#                                     facecolor=color, alpha=0.3,
+#                                     edgecolor=color, 
+#                                     linewidth=2,
+#                                     label=f'{loss_function.upper()} (RMSPE: {rmspe:.3f}°)' if j == 0 else "")
+#             ax.add_patch(circle)
+            
+#             # Draw phase segment (line from center to edge)
+#             segment_x = pos + radius * np.cos(phase)
+#             segment_y = current_y + radius * np.sin(phase)
+#             ax.plot([pos, segment_x], [current_y, segment_y], color=color, linewidth=2)
+            
+#             # Add antenna number
+#             if j == 0:  # Only add for first antenna to avoid clutter
+#                 ax.text(pos - 0.3, current_y, f'{loss_function.upper()}', 
+#                     ha='right', va='center', fontsize=10, fontweight='bold', color=color)
+        
+#         # Add horizontal reference line
+#         ax.axhline(y=current_y, color=color, linestyle=':', alpha=0.3, linewidth=1)
+        
+#         plotted_loss_functions.append(loss_function)
+#         current_y -= row_spacing
+    
+#     # Plot physical parameters if available (bottom row)
+#     if true_positions is not None and true_gains is not None:
+#         true_positions_wl = true_positions / (wavelength / 2)
+        
+#         for j, (pos, gain) in enumerate(zip(true_positions_wl, true_gains)):
+#             radius = abs(gain) * 0.2
+#             phase = np.angle(gain)
+            
+#             # Draw circle with different style for physical parameters
+#             circle = patches.Circle((pos, current_y), radius, 
+#                                     facecolor='lightgray', 
+#                                     edgecolor='black', 
+#                                     linewidth=2, 
+#                                     alpha=0.7,
+#                                     label='Physical' if j == 0 else "")
+#             ax.add_patch(circle)
+            
+#             # Draw phase segment
+#             segment_x = pos + radius * np.cos(phase)
+#             segment_y = current_y + radius * np.sin(phase)
+#             ax.plot([pos, segment_x], [current_y, segment_y], 'k-', linewidth=2)
+        
+#         # Add label for physical parameters
+#         ax.text(true_positions_wl[0] - 0.3, current_y, 'PHYSICAL', 
+#             ha='right', va='center', fontsize=10, fontweight='bold', color='black')
+        
+#         # Add horizontal reference line
+#         ax.axhline(y=current_y, color='black', linestyle=':', alpha=0.3, linewidth=1)
+    
+#     # Set axis limits and labels
+#     all_positions = []
+#     for loss_function in plotted_loss_functions:
+#         result = results.get(loss_function, {})
+#         if 'learned_antenna_positions' in result:
+#             positions_wl = result['learned_antenna_positions'] / (wavelength / 2)
+#             all_positions.extend(positions_wl)
+    
+#     if true_positions is not None:
+#         all_positions.extend(true_positions_wl)
+    
+#     if all_positions:
+#         ax.set_xlim(min(all_positions) - 0.5, max(all_positions) + 0.5)
+    
+#     y_range = total_rows * row_spacing / 2 + 0.8
+#     ax.set_ylim(-y_range, y_range)
+#     ax.set_xlabel('x [λ/2]', fontsize=12, fontweight='bold')
+#     ax.set_ylabel('')
+    
+#     # Create title with summary
+#     rmspe_summary = ', '.join([f"{lf.upper()}: {results[lf]['rmspe']:.3f}°" 
+#                             for lf in plotted_loss_functions])
+#     title = f'Multi-Loss Learned Parameters Comparison\n{rmspe_summary}'
+#     ax.set_title(title, fontsize=14, fontweight='bold')
+    
+#     ax.grid(True, alpha=0.3)
+    
+#     # Create custom legend
+#     legend_elements = []
+#     for i, loss_function in enumerate(plotted_loss_functions):
+#         color = colors.get(loss_function, default_colors[i % len(default_colors)])
+#         rmspe = results[loss_function]['rmspe']
+#         legend_elements.append(
+#             plt.Line2D([0], [0], marker='o', color='w', markerfacecolor=color, 
+#                     markersize=10, markeredgecolor=color, markeredgewidth=2, 
+#                     alpha=0.7, label=f'{loss_function.upper()} (RMSPE: {rmspe:.3f}°)')
+#         )
+    
+#     if true_positions is not None:
+#         legend_elements.append(
+#             plt.Line2D([0], [0], marker='o', color='w', markerfacecolor='lightgray', 
+#                     markersize=10, markeredgecolor='black', markeredgewidth=2, 
+#                     alpha=0.7, label='Physical')
+#         )
+    
+#     ax.legend(handles=legend_elements, loc='upper right', fontsize=10)
+    
+#     # Remove y-axis ticks for cleaner look
+#     ax.set_yticks([])
+    
+#     plt.tight_layout()
+    
+#     # Save plot
+#     save_path = path / "multi_loss_learned_parameters.png"
+#     plt.savefig(save_path, dpi=300, bbox_inches='tight')
+#     plt.savefig(path / "multi_loss_learned_parameters.pdf", bbox_inches='tight')
+    
+#     print(f"Multi-loss learned parameters plot saved to: {save_path}")
+#     plt.show()

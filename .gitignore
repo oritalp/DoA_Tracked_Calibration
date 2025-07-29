@@ -12,4 +12,5 @@ wandb/
 *.out
 interactive.sh
 *.pth
-./datasets/
+datasets/
+results/
