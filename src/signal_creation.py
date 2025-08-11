@@ -134,14 +134,31 @@ class SystemModel:
         """
         return self.array
 
-    def get_antenna_gains(self):
+    def get_antenna_gains(self, normalized=False):
         """
         Get the gain perturbation applied to the steering vector
         
+        Args:
+            normalized (bool): If True, return L2-normalized gains. Defaults to False.
+        
         Returns:
-            Numpy array of gain perturbations
+            Torch tensor of gain perturbations, optionally normalized
         """
-        return self.gain_petrurbation if self.gain_petrurbation is not None else np.ones(self.params.N, dtype=torch.complex64)
+        gains = self.gain_petrurbation if self.gain_petrurbation is not None else np.ones(self.params.N, dtype=np.complex64)
+        
+        # Always convert to torch tensor
+        if isinstance(gains, np.ndarray):
+            gains_tensor = torch.from_numpy(gains)
+        else:
+            gains_tensor = gains
+        
+        # Apply L2 normalization if requested
+        if normalized:
+            norm = torch.norm(gains_tensor, p=2, dtype=torch.complex64)
+            if norm > 0:
+                gains_tensor = gains_tensor / norm
+        
+        return gains_tensor
 
 class Samples(SystemModel):
     """

@@ -18,6 +18,7 @@ The script can be run with the following command line arguments:
     --scheduler: Scheduler type
     --create: Create new dataset
     --wandb: Use wandb
+    --sqrt_log_loss_spectrum: Use sqrt(log) for spectrum loss
 
 """
 # Imports
@@ -29,6 +30,10 @@ import matplotlib.pyplot as plt
 from run_simulation import run_simulation
 import argparse
 import torch
+
+
+# Suppress NumPy 2.0 deprecation warnings
+warnings.filterwarnings("ignore", category=DeprecationWarning, module="numpy")
 
 #TODO: 
 # Right now, there are major duplications in the code which is very bad. Specifically, the multiloss run function
@@ -110,7 +115,7 @@ system_model_params = {
     "N": 16,  # number of antennas
     "M": 5,  # number of sources
     "T": 100,  # number of snapshots
-    "snr": 30,  # if defined, values in scenario_dict will be ignored 
+    "snr": 0,  # if defined, values in scenario_dict will be ignored 
     "bias": 0, # steering vector bias error
     "sv_noise_var": 0.0, # steering vector additive gaussian error noise variance
     "doa_range": 80, # The range of the DOA values [-doa_range, doa_range]
@@ -122,7 +127,7 @@ system_model_params = {
     # insert any valid float between 0 and wavelength/4 or "wavelength/n" to use with reference to the wavelength
     
     "gain_perturbation_var": 0.36, # The variance of the gain perturbation
-    "seed": 0,  # Seed for reproducibility
+    "seed": 1,  # Seed for reproducibility
     ############################### Fixed for now ##################################
     "field_type": "Far",  # Near, Far
     "signal_type": "Narrowband",  # Narrowband, broadband
@@ -148,18 +153,21 @@ model_config = \
 
 training_params = {
     # "batch_size": 128,  # Note: This is legacy parameter, actual batch size is handled by snapshots
-    "epochs": 1000,
+    "epochs": 10,
     "loss_type": "spectrum",  # rmspe, spectrum, unsupervised
     "optimizer": "Adam",  # Adam, SGD
     "scheduler": None,  # StepLR, ReduceLROnPlateau, None
-    "learning_rate": 4e-3,
+    "learning_rate": 1e-3,
     "step_size": 50,
     "weight_decay": 0.0,
     "use_wandb": True,
     "gradients_debug": False,  # Enable detailed gradient and parameter debugging
-    "maximum_spectrum_power": None,  # Maximum spectrum power clipping for balanced learning (ONLY USING SPECTRUM LOSS)
+    "target_spectrum_power": 2,  # Target spectrum power for guided learning (ONLY USING SPECTRUM LOSS) - None/0 to disable, else target value
     "log_loss_spectrum": True,  # Use the log of the spectrum powers for the spectrum loss to prevent peaks exploding
-    "max_grad_norm": 1e-2  # Maximum gradient norm for clipping. If None, no clipping. If float/int, clip gradients to this norm
+    "sqrt_log_loss_spectrum": False,  # Use sqrt(log) of the spectrum powers. Takes precedence over log_loss_spectrum if both are True
+    "max_grad_norm": 1e-2,  # Maximum gradient norm for clipping. If None, no clipping. If float/int, clip gradients to this norm
+    "gains_reg_coeff": 1,  # Coefficient for gains regularization. If 0, None, or not set, regularization is disabled
+    "normalized_target_gains_norm": 1.5  # Expected normalized norm of the gains vector (default: 1.0)
 }
 
 plotting_params = {
@@ -192,8 +200,9 @@ def parse_arguments():
     parser.add_argument('-lr', '--learning_rate', type=float, help='Learning rate', default=None)
     parser.add_argument('-wd', '--weight_decay', type=float, help='Weight decay', default=None)
     parser.add_argument('-step', '--step_size', type=int, help='Step size', default=None)
-    parser.add_argument('--maximum_spectrum_power', type=float, help='Maximum spectrum power for balanced learning (None to disable)', default=None)
+    parser.add_argument('--target_spectrum_power', type=float, help='Target spectrum power for guided learning (None to disable)', default=None)
     parser.add_argument('--max_grad_norm', type=float, help='Maximum gradient norm for clipping (None to disable)', default=None)
+    parser.add_argument('--sqrt_log_loss_spectrum', action="store_true", help='Use sqrt(log) for spectrum loss')
 
     parser.add_argument('-w', '--wandb', action="store_true", help='Use wandb')
     parser.add_argument('-c', '--create', action="store_true", help='create a new dataset')
@@ -260,10 +269,12 @@ if __name__ == "__main__":
         training_params["weight_decay"] = args.weight_decay
     if args.step_size is not None:
         training_params["step_size"] = args.step_size
-    if args.maximum_spectrum_power is not None:
-        training_params["maximum_spectrum_power"] = args.maximum_spectrum_power
+    if args.target_spectrum_power is not None:
+        training_params["target_spectrum_power"] = args.target_spectrum_power
     if args.max_grad_norm is not None:
         training_params["max_grad_norm"] = args.max_grad_norm
+    if args.sqrt_log_loss_spectrum:
+        training_params["sqrt_log_loss_spectrum"] = args.sqrt_log_loss_spectrum
 
     if args.wandb:
         training_params["use_wandb"] = args.wandb
@@ -299,18 +310,31 @@ if __name__ == "__main__":
         if 'estimated_angles' in results and 'true_angles' in results:
             print(f"True angles: {np.rad2deg(results['true_angles'])}")
             print(f"Estimated angles: {np.rad2deg(results['estimated_angles'])}")
-        if 'final_train_loss' in results:
-            print(f"Final training loss: {results['final_train_loss']:.6f}")  
+        if 'evaluation_loss' in results:
+            print(f"Evaluation loss: {results['evaluation_loss']:.6f}")  
         if "learned_antenna_positions" in results.keys() and "learned_antennas_gains" in results.keys():
-            if model_config["model_type"].lower() == "music":
-                print("These should be the tandard one:")
-            print(f"Learned antennas positions: {np.round(results['learned_antenna_positions'], 4)}")
-            print("Compared to the physical array positions:")
-            print(f"Physical antennas positions: {results['physical_array']}")
-            print(f"Learned antennas gains: {results['learned_antennas_gains']}")
-            print(f"Learned antennas gains phase: {np.round(np.angle(results['learned_antennas_gains'], deg=True), 4)}")
-            print(f"Learned antennas gains magnitude: {np.round(np.abs(results['learned_antennas_gains']), 4)}")
-            print("Compared to the physical antennas gains:")
-            print(f"Physical antennas gains: {results['physical_antennas_gains']}")
-            print(f"Physical antennas gains phase: {np.round(np.angle(results['physical_antennas_gains'], deg=True), 4)}")
-            print(f"Physical antennas gains magnitude: {np.round(np.abs(results['physical_antennas_gains']), 4)}")
+            # Calculate cosine similarity for antenna positions
+            learned_pos = np.asarray(results['learned_antenna_positions'])
+            physical_pos = np.asarray(results['physical_array'])
+            pos_cos_sim = np.dot(learned_pos, physical_pos) / (np.linalg.norm(learned_pos) * np.linalg.norm(physical_pos))
+            print(f"Antenna positions cosine similarity: {pos_cos_sim:.4f}")
+            
+            # Calculate L1 distance between antenna positions normalized by array length
+            pos_l1_distance = np.sum(np.abs(learned_pos - physical_pos)) / len(learned_pos)
+            print(f"Antenna positions normalized L1 distance: {pos_l1_distance:.6f}")
+            
+            # Use normalized gains for cosine similarity calculations
+            learned_gains_normalized = np.asarray(results['normalized_learned_antennas_gains'])  # Learned normalized gains
+            physical_gains_normalized = np.asarray(results['physical_antennas_gains_normalized'])  # Physical normalized gains
+            
+            # Calculate cosine similarity for gains magnitude
+            learned_mag = np.abs(learned_gains_normalized)
+            physical_mag = np.abs(physical_gains_normalized)
+            mag_cos_sim = np.dot(learned_mag, physical_mag) / (np.linalg.norm(learned_mag) * np.linalg.norm(physical_mag))
+            print(f"Gains magnitude cosine similarity: {mag_cos_sim:.4f}")
+            
+            # Calculate cosine similarity for gains phase
+            learned_phase = np.angle(learned_gains_normalized)
+            physical_phase = np.angle(physical_gains_normalized)
+            phase_cos_sim = np.dot(learned_phase, physical_phase) / (np.linalg.norm(learned_phase) * np.linalg.norm(physical_phase))
+            print(f"Gains phase cosine similarity: {phase_cos_sim:.4f}")

@@ -14,6 +14,7 @@ from tqdm import tqdm
 from datetime import datetime
 import time
 from typing import Dict, Any, Optional, Tuple, List
+import wandb
 
 from src.utils import sample_covariance
 import matplotlib.patches as patches
@@ -50,9 +51,7 @@ class AlgorithmFactory:
                 physical_array=kwargs.get('physical_array', None),
                 physical_gains=kwargs.get('physical_gains', None)
             )
-            algorithm.train()
         elif model_type.lower() == "music":
-            # For now, use DiffMUSIC in eval mode for classical MUSIC
             algorithm = DiffMUSIC(
                 system_model_params=system_model_params,
                 N=system_model_params.N,
@@ -60,7 +59,6 @@ class AlgorithmFactory:
                 physical_array=kwargs.get('physical_array', None),
                 physical_gains=kwargs.get('physical_gains', None)
             )
-            algorithm.eval()  # Set to evaluation mode for classical MUSIC behavior
         else:
             raise ValueError(f"Unknown model type: {model_type}")
         
@@ -210,10 +208,18 @@ class DoARunner:
         # Create loss function
         loss_kwargs = {}
         if loss_type == "spectrum":
-            if hasattr(self.system_params, 'maximum_spectrum_power'):
-                loss_kwargs['maximum_spectrum_power'] = self.system_params.maximum_spectrum_power
+            if hasattr(self.system_params, 'target_spectrum_power'):
+                loss_kwargs['target_spectrum_power'] = self.system_params.target_spectrum_power
             if hasattr(self.system_params, 'log_loss_spectrum'):
                 loss_kwargs['log_loss_spectrum'] = self.system_params.log_loss_spectrum
+            if hasattr(self.system_params, 'sqrt_log_loss_spectrum'):
+                loss_kwargs['sqrt_log_loss_spectrum'] = self.system_params.sqrt_log_loss_spectrum
+        
+        # Add gains regularization parameters
+        if hasattr(self.system_params, 'gains_reg_coeff'):
+            loss_kwargs['gains_reg_coeff'] = self.system_params.gains_reg_coeff
+        if hasattr(self.system_params, 'normalized_target_gains_norm'):
+            loss_kwargs['normalized_target_gains_norm'] = self.system_params.normalized_target_gains_norm
         
         self.loss_fn = self.factory.create_loss_function(loss_type, **loss_kwargs)
         
@@ -242,7 +248,10 @@ class DoARunner:
             trial_idx: Trial index for optimization mode (None for single mode)
         """
         if not getattr(self.system_params, 'use_wandb', False):
+            print("wandb disabled in system params")
             return
+        
+        print(f"Setting up wandb with use_wandb={getattr(self.system_params, 'use_wandb', False)}")
         
         try:
             import wandb
@@ -253,6 +262,8 @@ class DoARunner:
             project_name = f"{self.system_params.model_type}_{dt_string}"
 
             run_name = f"window_size_{window_size:.4f}_{self.system_params.loss_type}"
+            
+            print(f"Initializing wandb project: {project_name}, run: {run_name}")
 
             # Initialize wandb
             wandb.init(
@@ -274,10 +285,14 @@ class DoARunner:
                 reinit=True  # Allow multiple runs in same script
             )
             
+            print(f"wandb initialized successfully. Run URL: {wandb.run.url if wandb.run else 'N/A'}")
+            
         except ImportError:
             warnings.warn("wandb not installed. Install with 'pip install wandb' to enable logging.")
         except Exception as e:
             warnings.warn(f"Failed to initialize wandb: {e}")
+            import traceback
+            traceback.print_exc()
     
     def _close_wandb(self):
         """Close wandb run if active"""
@@ -285,8 +300,8 @@ class DoARunner:
             try:
                 import wandb
                 wandb.finish()
-            except:
-                pass
+            except Exception as e:
+                print(f"Warning: Failed to close wandb: {e}")
     
     def run(self) -> Dict[str, Any]:
         """
@@ -435,6 +450,9 @@ class DoARunner:
             Training results
         """
         
+        # Set algorithm to training mode
+        self.algorithm.train()
+        
         # Extract data
         true_angles = self.data_dict['true_angles'].to(self.device).unsqueeze(0)    # (1, M)
         M = len(self.data_dict['true_angles'])
@@ -453,7 +471,8 @@ class DoARunner:
         print(f"Training for {self.system_params.epochs} epochs...")
         
         for epoch in tqdm(range(self.system_params.epochs), desc="Training"):
-            epoch_loss, position_grad_mag, gain_grad_mag = self._train_epoch(self.cov_matrix, true_angles, M)
+            self.algorithm.train()  # Ensure algorithm is in training mode
+            epoch_loss, position_grad_mag, gain_grad_mag, loss_components, estimated_angles = self._train_epoch(self.cov_matrix, true_angles, M)
             
             # Compute L2 differences between true and learned parameters
             with torch.no_grad():
@@ -472,27 +491,71 @@ class DoARunner:
             # Log to wandb if enabled
             if getattr(self.system_params, 'use_wandb', False):
                 try:
-                    import wandb
                     
-                    # Compute norm of learned gains for logging
-                    learned_gains_norm = 0.0
+                    # Initialize raw_learned_gains_norm
+                    raw_learned_gains_norm = 0.0
                     if hasattr(self.algorithm, 'complex_gain'):
-                        _, learned_gains = self.algorithm.get_array_learnable_parameters(learnable=False)
-                        normalized_learned_gains_norm = np.linalg.norm(learned_gains)/ np.sqrt(len(learned_gains))  # Normalize by sqrt(M) for stability
+                        #Tracking the unnormalized learned gains
+                        _, learned_gains = self.algorithm.get_array_learnable_parameters(learnable=False, normalized_gain=False)
+                        raw_learned_gains_norm = np.linalg.norm(learned_gains)
 
+                    # Calculate RMSPE separately if the main loss is not RMSPE
+                    rmspe_loss = None
+                    if hasattr(self.loss_fn, 'loss_type') and self.loss_fn.loss_type.lower() != 'rmspe':
+                        from src.metrics import RMSPELoss
+                        rmspe_fn = RMSPELoss()
+                        rmspe_loss = rmspe_fn(estimated_angles, true_angles).item()
+
+                    # Calculate cosine similarities for normalized antenna gains
+                    gains_mag_cos_sim = None
+                    gains_phase_cos_sim = None
+                    if hasattr(self.algorithm, 'complex_gain'):
+                        # Get normalized learned and physical gains
+                        _, learned_gains_norm = self.algorithm.get_array_learnable_parameters(learnable=False, normalized_gain=True)
+                        physical_gains_norm = self.data_dict.get('physical_antennas_gains_normalized', None)
                         
-                    wandb.log({
+                        if physical_gains_norm is not None:
+                            # Convert to numpy if needed
+                            if isinstance(learned_gains_norm, torch.Tensor):
+                                learned_gains_norm = learned_gains_norm.cpu().detach().numpy()
+                            if isinstance(physical_gains_norm, torch.Tensor):
+                                physical_gains_norm = physical_gains_norm.cpu().numpy()
+                            
+                            # Calculate magnitude cosine similarity
+                            learned_mag = np.abs(learned_gains_norm)
+                            physical_mag = np.abs(physical_gains_norm)
+                            gains_mag_cos_sim = np.dot(learned_mag, physical_mag) / (np.linalg.norm(learned_mag) * np.linalg.norm(physical_mag))
+                            
+                            # Calculate phase cosine similarity
+                            learned_phase = np.angle(learned_gains_norm)
+                            physical_phase = np.angle(physical_gains_norm)
+                            gains_phase_cos_sim = np.dot(learned_phase, physical_phase) / (np.linalg.norm(learned_phase) * np.linalg.norm(physical_phase))
+                        
+                    # Prepare logging dict with loss components
+                    log_dict = {
                         "epoch": epoch,
-                        "train_loss": epoch_loss,
-                        "position_l2_diff": position_l2_diff,
-                        "gain_l2_diff": gain_l2_diff,
-                        "normalized_learned_gains_norm": normalized_learned_gains_norm,
-                        "learning_rate": current_lr if self.optimizer else 0,
-                        "position_grad_magnitude": position_grad_mag,
-                        "gain_grad_magnitude": gain_grad_mag
-                    })
-                except:
-                    pass
+                        "loss/total_loss": loss_components['total_loss'].item(),
+                        "loss/primary_loss": loss_components['primary_loss'].item(),
+                        "loss/regularization_loss": loss_components['regularization_loss'].item(),
+                        "loss/rmspe_loss": rmspe_loss if rmspe_loss is not None else 0.0,
+                        "parameters/position_l2_diff": position_l2_diff,
+                        "parameters/gain_l2_diff": gain_l2_diff,
+                        "parameters/raw_learned_gains_norm": raw_learned_gains_norm,
+                        "parameters/normalized_gains_mag_cosine_sim": gains_mag_cos_sim if gains_mag_cos_sim is not None else 0.0,
+                        "parameters/normalized_gains_phase_cosine_sim": gains_phase_cos_sim if gains_phase_cos_sim is not None else 0.0,
+                        "training/learning_rate": current_lr,
+                        "gradients/position_grad_magnitude": position_grad_mag,
+                        "gradients/gain_grad_magnitude": gain_grad_mag
+                    }
+                    
+                    if epoch % 10 == 0:  # Debug print every 10 epochs
+                        print(f"Logging to wandb at epoch {epoch}: total_loss={log_dict['loss/total_loss']:.6f}")
+                    
+                    wandb.log(log_dict)
+                except Exception as e:
+                    print(f"Warning: Failed to log to wandb: {e}")
+                    import traceback
+                    traceback.print_exc()
             
             # Step scheduler
             if self.scheduler:
@@ -548,8 +611,14 @@ class DoARunner:
 
                 loss_kwargs['peak_masks'] = peaks_masks
         
-        # Compute loss
-        loss = self.loss_fn(**loss_kwargs)
+        # Compute loss (pass algorithm instance for regularization)
+        loss_result = self.loss_fn(algorithm=self.algorithm, return_components=True, **loss_kwargs)
+        if isinstance(loss_result, dict):
+            loss = loss_result['total_loss']
+            loss_components = loss_result
+        else:
+            loss = loss_result
+            loss_components = {'total_loss': loss, 'primary_loss': loss, 'regularization_loss': torch.tensor(0.0), 'weighted_regularization_loss': torch.tensor(0.0)}
         
         # DIAGNOSTIC CODE - Track parameters before backward pass if debugging enabled
         if getattr(self.system_params, 'gradients_debug', False):
@@ -721,7 +790,7 @@ class DoARunner:
         
         self.optimizer.step()
         
-        return loss.item(), position_grad_mag, gain_grad_mag
+        return loss.item(), position_grad_mag, gain_grad_mag, loss_components, estimated_angles
     
     def _run_evaluation(self) -> Dict[str, Any]:
         """
@@ -730,6 +799,9 @@ class DoARunner:
         Returns:
             Evaluation results
         """
+        
+        # Set algorithm to evaluation mode for gain normalization
+        self.algorithm.eval()
         
         with torch.no_grad():
             # Extract data
@@ -746,6 +818,8 @@ class DoARunner:
             true_angles = true_angles.squeeze(0)  # (M,)
 
             learned_antenna_positions, learned_coplex_gains = self.algorithm.get_array_learnable_parameters(learnable=False)
+            # Also get normalized gains for comparison and plotting
+            _, learned_normalized_gains = self.algorithm.get_array_learnable_parameters(learnable=False, normalized_gain=True)
 
             # Compute MSE between real and estimated steering matrices
             steering_matrix_mse = self._compute_steering_matrix_mse(true_angles)
@@ -755,14 +829,45 @@ class DoARunner:
             rmspe_fn = RMSPELoss()
             rmspe = rmspe_fn(estimated_angles.unsqueeze(0), true_angles.unsqueeze(0))
 
+            # Compute evaluation loss using the same loss function used for training
+            evaluation_loss = 0.0
+            if self.loss_fn is not None:
+                # Prepare loss computation arguments (same as in training)
+                loss_kwargs = {
+                    'predictions': estimated_angles.unsqueeze(0),  # Add batch dimension
+                    'targets': true_angles.unsqueeze(0)          # Add batch dimension
+                }
+                
+                # Add additional arguments for spectrum-based losses
+                if hasattr(self.loss_fn, 'loss_type') and self.loss_fn.loss_type in ['spectrum', 'unsupervised']:
+                    loss_kwargs['spectrum'] = self.algorithm.music_spectrum
+                    loss_kwargs['angles_grid'] = self.algorithm.angles_grid
+                    
+                    if self.loss_fn.loss_type == 'unsupervised':
+                        # For unsupervised loss, we need peak masks - compute them from the evaluation
+                        if self.system_params.model_type.lower() == "diffmusic":
+                            # Get peaks masks from the algorithm result
+                            _, peaks_masks, _, _ = algorithm_result
+                        else:
+                            peaks_masks = None
+                        loss_kwargs['peak_masks'] = peaks_masks
+                
+                # Compute evaluation loss
+                loss_result = self.loss_fn(algorithm=self.algorithm, return_components=True, **loss_kwargs)
+                if isinstance(loss_result, dict):
+                    evaluation_loss = loss_result['total_loss'].item()
+                else:
+                    evaluation_loss = loss_result.item()
                    
         
         return {
             'estimated_angles': np.sort(estimated_angles.cpu().numpy()),
             'true_angles': true_angles.cpu().numpy(),
             'rmspe': rmspe.item(),
+            'evaluation_loss': evaluation_loss,
             "learned_antenna_positions": learned_antenna_positions,
             "learned_antennas_gains": learned_coplex_gains,
+            "normalized_learned_antennas_gains": learned_normalized_gains,
             'music_spectrum': self.algorithm.music_spectrum.cpu().numpy() if self.algorithm.music_spectrum is not None else None,
             'angles_grid': self.algorithm.angles_grid.cpu().numpy() if hasattr(self.algorithm, 'angles_grid') else None,
             'steering_matrix_mse': steering_matrix_mse 
@@ -809,36 +914,44 @@ class DoARunner:
 
     def _compute_parameter_l2_differences(self) -> tuple:
         """
-        Compute L2 differences between true and learned parameters
+        Compute L2 differences between true and learned parameters where the gains are normalized
         
         Returns:
             tuple: (position_l2_diff, gain_l2_diff)
         """
         # Get true parameters from data_dict
         true_positions = self.data_dict.get('physical_array', None)
-        true_gains = self.data_dict.get('physical_antennas_gains', None)
+        true_gains = self.data_dict.get('physical_antennas_gains_normalized', None)
         
         position_l2_diff = float('nan')
         gain_l2_diff = float('nan')
         
+        learned_positions, learned_gains = self.algorithm.get_array_learnable_parameters(learnable=False, normalized_gain=True)
+
+        if isinstance(learned_positions, np.ndarray):
+            # Convert to torch tensor if needed and move to device
+            learned_positions = torch.from_numpy(learned_positions).to(self.device)
+        if isinstance(learned_gains, np.ndarray):
+            learned_gains = torch.from_numpy(learned_gains).to(self.device)
+
         # Compute position L2 difference
-        if true_positions is not None and hasattr(self.algorithm, 'antenna_positions'):
+        if true_positions is not None:
             # Convert to torch tensor if needed and move to device
             if not isinstance(true_positions, torch.Tensor):
                 true_positions = torch.from_numpy(true_positions)
             true_positions = true_positions.to(self.device)
             
-            learned_positions = self.algorithm.antenna_positions
+            # Get learned positions via get_array_learnable_parameters
             position_l2_diff = torch.norm(true_positions - learned_positions).item()
         
         # Compute gain L2 difference
-        if true_gains is not None and hasattr(self.algorithm, 'complex_gain'):
+        if true_gains is not None and hasattr(self.algorithm, 'get_array_learnable_parameters'):
             # Convert to torch tensor if needed and move to device
             if not isinstance(true_gains, torch.Tensor):
                 true_gains = torch.from_numpy(true_gains)
             true_gains = true_gains.to(self.device)
             
-            learned_gains = self.algorithm.complex_gain
+            # Get normalized learned gains for comparison
             gain_l2_diff = torch.norm(true_gains - learned_gains).item()
         
         return position_l2_diff, gain_l2_diff
@@ -984,7 +1097,7 @@ class DoARunner:
         try:
             # Get physical parameters from data
             physical_array = self.data_dict.get('physical_array', None)
-            physical_gains = self.data_dict.get('physical_antennas_gains', None)
+            physical_gains = self.data_dict.get('physical_antennas_gains_normalized', None)
             measurements = self.data_dict.get('measurements', None)
             
             if physical_array is None or physical_gains is None or measurements is None:
@@ -1002,8 +1115,7 @@ class DoARunner:
                                          physical_array=physical_array, 
                                          physical_gains=physical_gains)
             
-            # Set to training mode to use diffMUSIC (soft peak finding) even during evaluation
-            physical_diffmusic.train()
+            physical_diffmusic.eval()  # Set to evaluation mode
             
             # Move to same device as current model if available
             if hasattr(self.algorithm, 'device'):
@@ -1060,7 +1172,7 @@ class DoARunner:
         
         # Get learned parameters from results (best run)
         learned_positions = self.results.get('learned_antenna_positions', None)
-        learned_gains = self.results.get('learned_antennas_gains', None)
+        learned_gains = self.results.get('normalized_learned_antennas_gains', None)  # Use normalized gains for visualization
         
         if learned_positions is None or learned_gains is None:
             print("Warning: No learned parameters found in results")
@@ -1068,7 +1180,7 @@ class DoARunner:
         
         # Get physical parameters for comparison
         physical_array = self.data_dict.get('physical_array', None)
-        physical_gains = self.data_dict.get('physical_antennas_gains', None)
+        physical_gains = self.data_dict.get('physical_antennas_gains_normalized', None)
         
         # Convert to numpy if they're torch tensors
         if physical_array is not None and isinstance(physical_array, torch.Tensor):
@@ -1083,11 +1195,19 @@ class DoARunner:
         wavelength = self.system_params.wavelength
         learned_positions_wl = learned_positions / (wavelength / 2)
         
+        # Find maximum magnitude across all gains for normalization
+        all_gain_magnitudes = [abs(gain) for gain in learned_gains]
+        if physical_array is not None and physical_gains is not None:
+            all_gain_magnitudes.extend([abs(gain) for gain in physical_gains])
+        
+        max_magnitude = max(all_gain_magnitudes)
+        max_radius = 0.45  # Fixed size for the largest circle
+        
         # Plot learned parameters (top row)
         y_learned = 1
         for j, (pos, gain) in enumerate(zip(learned_positions_wl, learned_gains)):
-            # Circle radius represents gain magnitude
-            radius = abs(gain) * 0.3
+            # Circle radius represents gain magnitude, normalized by max magnitude
+            radius = (abs(gain) / max_magnitude) * max_radius
             
             # Circle color and segment angle represent gain phase
             phase = np.angle(gain)
@@ -1115,7 +1235,8 @@ class DoARunner:
             y_physical = -1
             
             for j, (pos, gain) in enumerate(zip(physical_positions_wl, physical_gains)):
-                radius = abs(gain) * 0.3
+                # Circle radius represents gain magnitude, normalized by max magnitude
+                radius = (abs(gain) / max_magnitude) * max_radius
                 phase = np.angle(gain)
                 
                 # Draw circle
@@ -1149,8 +1270,7 @@ class DoARunner:
         # Create title with performance info
         rmspe = self.results.get('rmspe', 0)
         loss_type = getattr(self.system_params, 'loss_type', 'unknown')
-        steering_mse = self.results.get('steering_matrix_mse', float('nan'))
-        title = f"Learned Parameters ({loss_type.upper()}) - RMSPE: {rmspe:.6f}°, Steering MSE: {steering_mse:.6f}"
+        title = f"Learned Parameters ({loss_type.upper()}) - RMSPE: {rmspe:.6f}° after gains normalization"
         ax.set_title(title, fontsize=14, fontweight='bold')
         
         ax.grid(True, alpha=0.3)

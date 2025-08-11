@@ -28,7 +28,7 @@ from src.metrics import SpectrumLoss, UnsupervisedSpectrumLoss, RMSPELoss
 class DiffMUSIC(SubspaceMethod):
     """
     Differentiable MUSIC (diffMUSIC) and classical MUSIC implementation for DoA estimation with hardware impairment learning.
-    When model.training = True it runs diffMUSIC, otherwise, it runs classical MUSIC.
+    The algorithm choice (diffMUSIC vs MUSIC) is determined by system_model_params.model_type.
     
     This implementation is focused on:
     - Far-field scenarios only
@@ -39,7 +39,8 @@ class DiffMUSIC(SubspaceMethod):
     - Learnable antenna positions (nn.Parameter)
     - Learnable complex gains (nn.Parameter) 
     - Differentiable steering matrix computation
-    - Softmax-based peak finding for differentiability
+    - Softmax-based peak finding for differentiability (diffMUSIC)
+    - Hard peak finding for classical MUSIC
     """
 
     def __init__(self, system_model_params, N: int, model_order_estimation: str = None,
@@ -48,10 +49,11 @@ class DiffMUSIC(SubspaceMethod):
         Initialize diffMUSIC
         
         Args:
-            system_model: System model object (kept for compatibility)
+            system_model_params: System model parameters object
             N: Number of antennas
-            wavelength: Signal wavelength  
             model_order_estimation: Model order estimation method
+            physical_array: Physical array positions (optional)
+            physical_gains: Physical antenna gains (optional)
         """
         system_model = SystemModel(system_model_params)
         super().__init__(system_model, model_order_estimation=model_order_estimation,
@@ -61,6 +63,9 @@ class DiffMUSIC(SubspaceMethod):
         self.N = N
         self.wavelength = self.params.wavelength
         self.window_size = self.params.softmax_window_size
+        
+        # Store model type for algorithm selection
+        self.model_type = system_model_params.model_type.lower() if hasattr(system_model_params, 'model_type') else 'diffmusic'
         
         # Initialize learnable parameters
         self._init_learnable_parameters()
@@ -111,14 +116,34 @@ class DiffMUSIC(SubspaceMethod):
         # This will be computed dynamically during forward pass since parameters are learnable
         pass
 
-    def get_array_learnable_parameters(self, learnable = True) -> tuple:
+    def get_array_learnable_parameters(self, learnable = True, normalized_gain: bool = False) -> tuple:
         """
-        Get the learnable antenna positions and complex gains - if learnable return nn.Parameters, else return numpy arrays detached from the graph.
+        Get the learnable antenna positions and complex gains
+        
+        Args:
+            learnable: If True, return nn.Parameters; if False, return detached numpy arrays
+            normalized_gain: If True, normalize gains to L2 norm of 1 (only works when learnable=False)
+        
+        Returns:
+            tuple: (antenna_positions, complex_gains)
         """
+        if normalized_gain and learnable:
+            raise ValueError("normalized_gain=True can only be used when learnable=False")
+            
         if learnable:
             return self.antenna_positions, self.complex_gain
         else:
-            return self.antenna_positions.detach().cpu().numpy(), self.complex_gain.detach().cpu().numpy()
+            # CRITICAL FIX: Ensure proper deep copy to avoid memory sharing issues
+            # Use .clone() before .detach() to ensure we get a completely separate tensor
+            positions = self.antenna_positions.clone().detach().cpu().numpy()
+            gains = self.complex_gain.clone().detach().cpu().numpy()
+            
+            if normalized_gain:
+                # Normalize gains to L2 norm of 1
+                gains_norm = np.linalg.norm(gains)
+                gains /= (gains_norm + 1e-8)  # Prevent division by zero
+            
+            return positions, gains
     
     def set_window_size(self, window_size):
         """
@@ -151,8 +176,18 @@ class DiffMUSIC(SubspaceMethod):
         # Ensure angles have the same dtype as antenna_positions (float64)
         angles = angles.to(torch.float64)
         
-        # Get complex gains
-        antenna_positions, complex_gains = self.get_array_learnable_parameters(learnable=True)
+        # Get complex gains - use normalized version when not in training mode
+        if self.training:
+            antenna_positions, complex_gains = self.get_array_learnable_parameters(learnable=True)
+        else:
+            # Use normalized gains during evaluation
+            antenna_positions_np, complex_gains_np = self.get_array_learnable_parameters(
+                learnable=False, normalized_gain=True
+            )
+            # Convert back to torch tensors
+            antenna_positions = torch.from_numpy(antenna_positions_np).to(self.antenna_positions.device)
+            complex_gains = torch.from_numpy(complex_gains_np).to(self.complex_gain.device)
+        
         complex_gains = complex_gains.to(torch.complex128)  # Ensure complex gains are in complex128 format
         
         # Compute steering vectors: a(θ) = g ⊙ exp(-j * 2π * p * sin(θ) / λ)
@@ -230,7 +265,7 @@ class DiffMUSIC(SubspaceMethod):
 
     def _peak_finder(self, number_of_sources: int) -> torch.Tensor:
         """
-        Peak finding - differentiable during training, hard during inference
+        Peak finding - soft for diffMUSIC, hard for MUSIC
         
         Args:
             number_of_sources: Number of peaks to find
@@ -238,9 +273,9 @@ class DiffMUSIC(SubspaceMethod):
         Returns:
             Estimated angles in radians
         """
-        if self.training: #This is built-in since it is a Module, just use model.train() or model.eval()
+        if self.model_type == "diffmusic":
             return self._differentiable_peak_finder(number_of_sources)
-        else:
+        else:  # MUSIC or other types
             return self._hard_peak_finder(number_of_sources, return_angles=True)
 
     def _hard_peak_finder(self, number_of_sources: int, return_angles = True) -> torch.Tensor:
@@ -261,28 +296,15 @@ class DiffMUSIC(SubspaceMethod):
             spectrum = self.music_spectrum[batch].cpu().detach().numpy()
             
             # Find peaks using scipy
-            peaks_indices = sc.signal.find_peaks(spectrum)[0]
+            peaks_indices = sc.signal.find_peaks(spectrum, threshold=0.0)[0]
             
             if len(peaks_indices) < number_of_sources:
                 warnings.warn(f"diffMUSIC: Not enough peaks found, trying to find another {number_of_sources - len(peaks_indices)} peaks by top amplitude.")
-                # Use highest values instead, but exclude already found peaks
-                additional_needed = number_of_sources - len(peaks_indices)
-                
-                # Get all indices sorted by amplitude (highest first)
-                all_indices = np.argsort(spectrum)[::-1]
-                
-                # Remove already found peaks from candidates
-                candidates = []
-                for idx in all_indices:
-                    if idx not in peaks_indices:
-                        candidates.append(idx)
-                        if len(candidates) >= additional_needed:
-                            break
-                
-                # Add the additional peaks
-                if candidates:
-                    additional_peaks = np.array(candidates[:additional_needed])
-                    peaks_indices = np.concatenate([peaks_indices, additional_peaks])
+                # Use highest values instead
+                additional_peaks = torch.topk(torch.from_numpy(spectrum), 
+                                            number_of_sources - len(peaks_indices), 
+                                            largest=True).indices.numpy()
+                peaks_indices = np.concatenate([peaks_indices, additional_peaks])
             
             # Sort by amplitude and take top peaks
             sorted_peaks = peaks_indices[np.argsort(spectrum[peaks_indices])[::-1]]
@@ -389,6 +411,44 @@ class DiffMUSIC(SubspaceMethod):
             self.antenna_positions.copy_(positions)
             self.complex_gain.copy_(gains)
 
+    def plot_spectrum(self, highlight_angles: torch.Tensor = None, 
+                     path_to_save: str | None = False, batch_idx: int = 0):
+        """
+        Plot the MUSIC spectrum
+        
+        Args:
+            batch_idx: Which batch element to plot
+            highlight_angles: True angles to highlight on the plot
+            save: Whether to save the plot
+            title: Plot title
+        """
+        if self.music_spectrum is None:
+            warnings.warn("No spectrum computed yet. Run forward pass first.")
+            return
+        
+        angles_deg = torch.rad2deg(self.angles_grid).cpu().numpy()
+        spectrum = self.music_spectrum[batch_idx].cpu().detach().numpy()
+        
+        plt.figure(figsize=(10, 6))
+        plt.plot(angles_deg, spectrum, 'b-', linewidth=2, label=f'{self.model_type.upper()} Spectrum')
+        
+        if highlight_angles is not None:
+            highlight_deg = torch.rad2deg(highlight_angles).cpu().numpy()
+            for i, angle in enumerate(highlight_deg):
+                plt.axvline(x=angle, color='r', linestyle='--', alpha=0.7, 
+                           label='True DoA' if i == 0 else "")
+        
+        plt.xlabel('Angle [degrees]')
+        plt.ylabel('Spectrum Power')
+        plt.title(self.model_type.upper() + " Spectrum")
+        plt.grid(True, alpha=0.3)
+        plt.legend()
+        plt.tight_layout()
+        
+        if path_to_save is not None:
+            plt.savefig(path_to_save / f"Spectrum.png", dpi=300)
+        plt.show()
+
 
 
 class DiffMUSICLoss(nn.Module):
@@ -397,14 +457,19 @@ class DiffMUSICLoss(nn.Module):
     Supports different loss strategies: RMSPE, spectrum, and unsupervised
     """
     
-    def __init__(self, loss_type: str = "rmspe", **kwargs):
+    def __init__(self, loss_type: str = "rmspe", gains_reg_coeff: float = 0.0, 
+                 normalized_target_gains_norm: float = 1.0, **kwargs):
         """
         Args:
             loss_type: "rmspe" for LSL,θ, "spectrum" for LSL,P, or "unsupervised" for LUL
+            gains_reg_coeff: Coefficient for gains regularization. If 0, regularization is disabled
+            normalized_target_gains_norm: Target normalized norm of the gains vector (default: 1.0)
             **kwargs: Additional arguments for specific loss functions
         """
         super(DiffMUSICLoss, self).__init__()
         self.loss_type = loss_type
+        self.gains_reg_coeff = gains_reg_coeff
+        self.normalized_target_gains_norm = normalized_target_gains_norm
         
         # Import loss functions from metrics
         from src.metrics import RMSPELoss, SpectrumLoss, UnsupervisedSpectrumLoss
@@ -418,15 +483,71 @@ class DiffMUSICLoss(nn.Module):
         else:
             raise ValueError(f"Unknown loss type: {loss_type}")
     
-    def forward(self, **kwargs):
+    def _compute_gains_regularization(self, algorithm):
         """
-        Forward pass - delegates to appropriate loss function
+        Compute gains regularization term: gains_reg_coeff * (||learned_gains||_L2 / sqrt(len(learned_gains)) - normalized_target_gains_norm)^2
+        
+        Args:
+            algorithm: DiffMUSIC algorithm instance with learnable gains
+            
+        Returns:
+            regularization_loss: Computed regularization loss (tensor)
         """
+        if self.gains_reg_coeff == 0 or not hasattr(algorithm, 'complex_gain'):
+            return torch.tensor(0.0, device=algorithm.complex_gain.device, requires_grad=True)
+        
+        # Get the learned gains (not normalized)
+        _, learned_gains = algorithm.get_array_learnable_parameters(learnable=True)
+        
+        # Debug: Check if gradients are enabled
+        if not learned_gains.requires_grad:
+            print(f"WARNING: learned_gains.requires_grad = {learned_gains.requires_grad}")
+        
+        # Compute L2 norm of gains and normalize by sqrt(length)
+        gains_l2_norm = torch.linalg.norm(learned_gains, ord=2)
+        sqrt_length = torch.sqrt(torch.tensor(len(learned_gains), device=learned_gains.device, dtype=gains_l2_norm.dtype))
+        normalized_gains_norm = gains_l2_norm / sqrt_length
+        
+        # Convert target to tensor on correct device
+        target_norm = torch.tensor(self.normalized_target_gains_norm, 
+                                   device=learned_gains.device, dtype=normalized_gains_norm.dtype)
+        
+        # Use squared difference to avoid gradient issues at zero and ensure proper gradient flow
+        difference = normalized_gains_norm - target_norm
+        regularization_loss = self.gains_reg_coeff * (difference ** 2)
+        
+        return regularization_loss
+    
+    def forward(self, algorithm=None, return_components=False, **kwargs):
+        """
+        Forward pass - delegates to appropriate loss function and adds regularization
+        
+        Args:
+            algorithm: DiffMUSIC algorithm instance (for regularization)
+            return_components: If True, return dictionary with loss components
+            **kwargs: Arguments for the specific loss function
+        """
+        # Compute primary loss
         if self.loss_type == "rmspe":
-            return self.loss_fn(kwargs['predictions'], kwargs['targets'])
+            primary_loss = self.loss_fn(kwargs['predictions'], kwargs['targets'])
         elif self.loss_type == "spectrum":
-            return self.loss_fn(kwargs['spectrum'], kwargs['targets'], kwargs['angles_grid'])
+            primary_loss = self.loss_fn(kwargs['spectrum'], kwargs['targets'], kwargs['angles_grid'])
         elif self.loss_type == "unsupervised":
-            return self.loss_fn(kwargs['spectrum'], kwargs['peak_masks'])
+            primary_loss = self.loss_fn(kwargs['spectrum'], kwargs['peak_masks'])
         else:
             raise ValueError(f"Unknown loss type: {self.loss_type}")
+        
+        # Compute regularization loss
+        regularization_loss = self._compute_gains_regularization(algorithm) if algorithm is not None else torch.tensor(0.0)
+        
+        # Total loss
+        total_loss = primary_loss + regularization_loss
+        
+        if return_components:
+            return {
+                'total_loss': total_loss,
+                'primary_loss': primary_loss,
+                'regularization_loss': regularization_loss
+            }
+        else:
+            return total_loss

@@ -84,28 +84,17 @@ class SpectrumLoss(nn.Module):
     Maximizes spectrum amplitude at true DoA locations
     """
     
-    def __init__(self, maximum_spectrum_power: float = None, sharpness: float = 10.0, 
-                 log_loss_spectrum: bool = False):
+    def __init__(self, target_spectrum_power: float = None, log_loss_spectrum: bool = False, sqrt_log_loss_spectrum: bool = False):
         """
         Args:
-            maximum_spectrum_power: Maximum spectrum power for clipping (None to disable)
-            sharpness: Sharpness parameter for differentiable min operation (higher = sharper)
+            target_spectrum_power: Target spectrum power for guided learning (None to disable, else target value)
             log_loss_spectrum: Use the log of spectrum values to prevent exploding peaks
+            sqrt_log_loss_spectrum: Use sqrt(log) of spectrum values. Takes precedence over log_loss_spectrum
         """
         super(SpectrumLoss, self).__init__()
-        self.maximum_spectrum_power = maximum_spectrum_power
-        self.sharpness = sharpness
+        self.target_spectrum_power = target_spectrum_power
         self.log_loss_spectrum = log_loss_spectrum
-        
-        # # Warning about double suppression effects
-        # if self.log_loss_spectrum and self.maximum_spectrum_power is not None:
-        #     import warnings
-        #     warnings.warn(
-        #         "Both log_loss_spectrum=True and maximum_spectrum_power are enabled. "
-        #         "This creates double suppression effects which may negatively impact training. "
-        #         "Consider using only one suppression method.",
-        #         UserWarning
-        #     )
+        self.sqrt_log_loss_spectrum = sqrt_log_loss_spectrum
     
     def forward(self, spectrum: torch.Tensor, true_angles: torch.Tensor, 
                 angles_grid: torch.Tensor) -> torch.Tensor:
@@ -130,28 +119,27 @@ class SpectrumLoss(nn.Module):
                 spectrum_value = spectrum[batch, angle_idx]
                 
                 # Apply log transformation if enabled
-                if self.log_loss_spectrum:
-                    # Use log(spectrum + epsilon) to prevent log(0) and exploding peaks
+                if self.sqrt_log_loss_spectrum:
+                    # Use sqrt(log(spectrum + epsilon)) to prevent log(0) and reduce harshness
+                    epsilon = 1e-8
+                    spectrum_value = torch.sqrt(torch.log(spectrum_value + epsilon))
+                elif self.log_loss_spectrum:
+                    # Use log(spectrum + epsilon) to prevent log(0)
                     epsilon = 1e-8
                     spectrum_value = torch.log(spectrum_value + epsilon)
                 
-                # Apply maximum spectrum power clipping if enabled
-                if self.maximum_spectrum_power is not None:
-                    # Use standard LogSumExp trick for differentiable min operation
-                    # min(a, b) = -log(exp(-β*a) + exp(-β*b)) / β
-                    max_power = torch.tensor(self.maximum_spectrum_power, device=spectrum.device, dtype=spectrum.dtype)
-                    
-                    # Standard LogSumExp min
-                    beta = self.sharpness
-                    exp_neg_s = torch.exp(-beta * spectrum_value)
-                    exp_neg_m = torch.exp(-beta * max_power)
-                    clamped_spectrum = -torch.log(exp_neg_s + exp_neg_m) / beta
+                # Apply target-based loss or original loss
+                if self.target_spectrum_power is not None and self.target_spectrum_power != 0:
+                    # New target-based loss logic
+                    if spectrum_value < self.target_spectrum_power:
+                        loss_contribution = self.target_spectrum_power - spectrum_value
+                    else:
+                        loss_contribution = spectrum_value - self.target_spectrum_power
                 else:
-                    clamped_spectrum = spectrum_value
-            
-
-                # Negative spectrum value (to maximize)
-                total_loss -= clamped_spectrum
+                    # Original loss: negative spectrum value (to maximize)
+                    loss_contribution = -spectrum_value
+                
+                total_loss += loss_contribution
         
         # Uncomment the following row to normalize also by the number of true angles, this is not done
         # here for consistency with the paper loss definition. Doesn't influence the optimization.
@@ -176,7 +164,7 @@ class JainsIndexLoss(nn.Module):
             x: Input tensor (spectrum values)
             
         Returns:
-            Jain's index value (higher = more concentrated)
+            Jain's index value (between 0 and 1 when lower is more concentrated)
         """
         n = x.shape[0]
         sum_x = torch.sum(x)
@@ -184,8 +172,7 @@ class JainsIndexLoss(nn.Module):
         
         jains_index = (sum_x ** 2) / (n * sum_x_squared + 1e-8)
         
-        # Return negative to minimize (we want to maximize Jain's index)
-        return -jains_index
+        return jains_index
 
 
 class UnsupervisedSpectrumLoss(nn.Module):
