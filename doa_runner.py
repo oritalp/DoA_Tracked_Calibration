@@ -8,6 +8,7 @@ import torch.optim as optim
 import torch.optim.lr_scheduler as lr_scheduler
 import numpy as np
 import warnings
+import copy
 from pathlib import Path
 from typing import Dict, Any, Optional, Tuple
 from tqdm import tqdm
@@ -15,6 +16,7 @@ from datetime import datetime
 import time
 from typing import Dict, Any, Optional, Tuple, List
 import wandb
+import copy
 
 from src.utils import sample_covariance
 import matplotlib.patches as patches
@@ -1001,8 +1003,10 @@ class DoARunner:
         if self.results is None:
             raise ValueError("No results available. Run the algorithm first.")
         
-        # Check if we should plot physical spectrum comparison
+        # Check plotting options
         plot_physical_spectrum = getattr(self.system_params, 'plot_physical_spectrum', False)
+        plot_nominal_spectrum = getattr(self.system_params, 'plot_nominal_spectrum', False)
+        log_spectrum = getattr(self.system_params, 'log_spectrum', False)
         
         # Get spectrum and angles grid from results (best run)
         music_spectrum = self.results.get('music_spectrum', None)
@@ -1020,21 +1024,38 @@ class DoARunner:
         # Plot the main result spectrum
         self._plot_result_spectrum(ax, music_spectrum, angles_grid, true_angles, estimated_angles)
         
-        # Plot physical spectrum if requested and available for diffMUSIC
-        if plot_physical_spectrum and self.system_params.model_type.lower() == "diffmusic":
-            self._plot_physical_diffmusic_spectrum(ax, path)
+        # Plot physical spectrum if requested (works for both diffMUSIC and MUSIC)
+        if plot_physical_spectrum:
+            self._plot_spectrum_with_specified_parameters(ax, path, parameters_type="physical", algorithm = "diffmusic")
+        
+        # Plot nominal spectrum if requested (works for both diffMUSIC and MUSIC)
+        if plot_nominal_spectrum:
+            self._plot_spectrum_with_specified_parameters(ax, path, parameters_type="nominal", algorithm = "diffmusic")
+        
+        # Apply log scale if requested
+        if log_spectrum:
+            ax.set_yscale('log')
         
         # Finalize plot
         ax.set_xlabel('Angle [degrees]', fontsize=12, fontweight='bold')
-        ax.set_ylabel('Spectrum Power', fontsize=12, fontweight='bold')
+        ylabel = 'Spectrum Power (log scale)' if log_spectrum else 'Spectrum Power'
+        ax.set_ylabel(ylabel, fontsize=12, fontweight='bold')
         
         # Create title with performance info
         rmspe = self.results.get('rmspe', 0)
         loss_type = getattr(self.system_params, 'loss_type', 'unknown')
         window_size = self.results.get('optimal_window_size', 'unknown')
         title = f"{self.system_params.model_type} Spectrum ({loss_type.upper()}) - RMSPE: {rmspe:.6f}°, Window Size: {window_size}"
+        
+        # Add comparison info to title
+        comparison_info = []
         if plot_physical_spectrum:
-            title += " with Physical Parameters Comparison"
+            comparison_info.append("Physical")
+        if plot_nominal_spectrum:
+            comparison_info.append("Nominal")
+        if comparison_info:
+            title += f" with {' & '.join(comparison_info)} Parameters Comparison"
+        
         ax.set_title(title, fontsize=14, fontweight='bold')
         
         ax.grid(True, alpha=0.3)
@@ -1086,22 +1107,25 @@ class DoARunner:
                 ax.axvline(x=angle, color='g', linestyle=':', alpha=0.7, 
                           label='Estimated DoA' if i == 0 else "")
 
-    def _plot_physical_diffmusic_spectrum(self, ax, path: Path):
+    def _plot_spectrum_with_specified_parameters(self, ax, path: Path, parameters_type: str = "physical", algorithm: str = None):
         """
-        Plot diffMUSIC spectrum using actual physical parameters for comparison
+        Plot diffMUSIC spectrum using specified parameters for comparison
         
         Args:
             ax: Matplotlib axis to plot on
             path: Path for potential debugging/saving
+            parameters_type: Either "physical" or "nominal" parameters to use
+            algorithm: Either "diffmusic" or "music", if None uses self.params.model_type
         """
         try:
-            # Get physical parameters from data
-            physical_array = self.data_dict.get('physical_array', None)
-            physical_gains = self.data_dict.get('physical_antennas_gains_normalized', None)
-            measurements = self.data_dict.get('measurements', None)
+            # Determine algorithm type
+            if algorithm is None:
+                algorithm = self.system_params.model_type.lower()
             
-            if physical_array is None or physical_gains is None or measurements is None:
-                print("Warning: Physical parameters or measurements not available for comparison spectrum")
+            # Get measurements for covariance computation
+            measurements = self.data_dict.get('measurements', None)
+            if measurements is None:
+                print("Warning: Measurements not available for comparison spectrum")
                 return
             
             # Import diffMUSIC here to avoid circular imports
@@ -1110,29 +1134,54 @@ class DoARunner:
             # Create covariance matrix from measurements
             cov_matrix = sample_covariance(measurements)
             
-            # Create a new diffMUSIC instance with physical parameters
-            physical_diffmusic = DiffMUSIC(self.system_params, self.system_params.N, 
-                                         physical_array=physical_array, 
-                                         physical_gains=physical_gains)
+            # Prepare parameters based on type
+            if parameters_type == "physical":
+                # Get physical parameters from data
+                specified_array = self.data_dict.get('physical_array', None)
+                specified_gains = self.data_dict.get('physical_antennas_gains_normalized', None)
+                
+                if specified_array is None or specified_gains is None:
+                    print("Warning: Physical parameters not available for comparison spectrum")
+                    return
+                    
+                label_suffix = "Physical Parameters"
+                line_style = 'k:'
+                
+            elif parameters_type == "nominal":
+                # Create nominal parameters (ULA + unit gains)
+                wavelength = self.system_params.wavelength
+                N = self.system_params.N
+                
+                # Nominal ULA positions
+                specified_array = np.arange(N, dtype=np.float64) * (wavelength / 2)
+                
+                # Nominal unit gains
+                specified_gains = np.ones(N, dtype=np.complex64)
+                
+                label_suffix = "Nominal Parameters"
+                line_style = 'r--'
+                
+            else:
+                raise ValueError(f"parameters_type must be 'physical' or 'nominal', got '{parameters_type}'")
             
-            physical_diffmusic.eval()  # Set to evaluation mode
+            # Create a copy of system_params with the correct model_type for plotting
+            
+            plotting_system_params = copy.deepcopy(self.system_params)
+            plotting_system_params.model_type = algorithm
+            
+            # Create a new diffMUSIC instance with specified parameters and model type
+            specified_diffmusic = DiffMUSIC(plotting_system_params, self.system_params.N, 
+                                          physical_array=specified_array, 
+                                          physical_gains=specified_gains)
+            
+            specified_diffmusic.eval()  # Set to evaluation mode
             
             # Move to same device as current model if available
             if hasattr(self.algorithm, 'device'):
-                physical_diffmusic = physical_diffmusic.to(self.algorithm.device)
+                specified_diffmusic = specified_diffmusic.to(self.algorithm.device)
                 device = self.algorithm.device
             else:
                 device = torch.device('cpu')
-            
-            # Set physical parameters
-            with torch.no_grad():
-                if isinstance(physical_array, np.ndarray):
-                    physical_array = torch.from_numpy(physical_array).to(torch.float64)
-                if isinstance(physical_gains, np.ndarray):
-                    physical_gains = torch.from_numpy(physical_gains).to(torch.complex64)
-                    
-                physical_diffmusic.antenna_positions.copy_(physical_array.to(device))
-                physical_diffmusic.complex_gain.copy_(physical_gains.to(device))
             
             # Run forward pass to compute spectrum
             with torch.no_grad():
@@ -1141,21 +1190,21 @@ class DoARunner:
                     cov_matrix = cov_matrix.unsqueeze(0)  # Add batch dimension
                 
                 # Call the model (which automatically calls forward) to populate its music spectrum
-                _ = physical_diffmusic(cov_matrix.to(device), self.system_params.M)
+                _ = specified_diffmusic(cov_matrix.to(device), self.system_params.M)
             
-            # Extract and plot the physical spectrum
-            if physical_diffmusic.music_spectrum is not None:
-                angles_deg = torch.rad2deg(physical_diffmusic.angles_grid).cpu().numpy()
-                physical_spectrum = physical_diffmusic.music_spectrum[0].cpu().detach().numpy()  # Take first batch
+            # Extract and plot the specified spectrum
+            if specified_diffmusic.music_spectrum is not None:
+                angles_deg = torch.rad2deg(specified_diffmusic.angles_grid).cpu().numpy()
+                specified_spectrum = specified_diffmusic.music_spectrum[0].cpu().detach().numpy()  # Take first batch
                 
-                ax.plot(angles_deg, physical_spectrum, 'k:', linewidth=3, alpha=0.8,
-                        label='diffMUSIC Spectrum (Physical Parameters)')
-                print("Physical parameters spectrum plotted successfully")
+                ax.plot(angles_deg, specified_spectrum, line_style, linewidth=3, alpha=0.8,
+                        label=f'{algorithm.upper()} Spectrum ({label_suffix})')
+                print(f"{parameters_type.capitalize()} parameters spectrum plotted successfully for {algorithm.upper()}")
             else:
-                print("Warning: Failed to compute physical parameters spectrum")
+                print(f"Warning: Failed to compute {parameters_type} parameters spectrum for {algorithm.upper()}")
                 
         except Exception as e:
-            print(f"Warning: Error computing physical spectrum: {e}")
+            print(f"Warning: Error computing {parameters_type} spectrum for {algorithm.upper()}: {e}")
             import traceback
             traceback.print_exc()
 

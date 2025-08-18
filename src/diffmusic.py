@@ -68,7 +68,7 @@ class DiffMUSIC(SubspaceMethod):
         self.model_type = system_model_params.model_type.lower() if hasattr(system_model_params, 'model_type') else 'diffmusic'
         
         # Initialize learnable parameters
-        self._init_learnable_parameters()
+        self._init_learnable_parameters(physical_array, physical_gains)
         
         # Initialize DoA grid for far-field
         self._init_angle_grid()
@@ -79,18 +79,36 @@ class DiffMUSIC(SubspaceMethod):
         self.music_spectrum = None
         self.noise_subspace = None
 
-    def _init_learnable_parameters(self):
+    def _init_learnable_parameters(self, physical_array=None, physical_gains=None):
         """Initialize learnable antenna positions and complex gains"""
         
-        # Initialize antenna positions - nominal ULA with half-wavelength spacing
-        nominal_positions = torch.arange(self.N, dtype=torch.float64) * (self.wavelength / 2)
-        self.antenna_positions = nn.Parameter(nominal_positions)
+        # Initialize antenna positions
+        if physical_array is not None:
+            # Use provided physical array positions
+            if isinstance(physical_array, np.ndarray):
+                initial_positions = torch.from_numpy(physical_array).to(torch.float64)
+            else:
+                initial_positions = physical_array.to(torch.float64)
+        else:
+            # Default: nominal ULA with half-wavelength spacing
+            initial_positions = torch.arange(self.N, dtype=torch.float64) * (self.wavelength / 2)
         
-        # Initialize complex gains - start with unit gains (real=1, imag=0)
-        gains_real = torch.ones(self.N, dtype=torch.float64)
-        gains_imag = torch.zeros(self.N, dtype=torch.float64)
-        complex_gain = torch.complex(gains_real, gains_imag).to(torch.complex64)
-        self.complex_gain = nn.Parameter(complex_gain)
+        self.antenna_positions = nn.Parameter(initial_positions)
+        
+        # Initialize complex gains
+        if physical_gains is not None:
+            # Use provided physical gains
+            if isinstance(physical_gains, np.ndarray):
+                initial_gains = torch.from_numpy(physical_gains).to(torch.complex64)
+            else:
+                initial_gains = physical_gains.to(torch.complex64)
+        else:
+            # Default: unit gains (real=1, imag=0)
+            gains_real = torch.ones(self.N, dtype=torch.float64)
+            gains_imag = torch.zeros(self.N, dtype=torch.float64)
+            initial_gains = torch.complex(gains_real, gains_imag).to(torch.complex64)
+        
+        self.complex_gain = nn.Parameter(initial_gains)
 
     def _init_angle_grid(self):
         """Initialize angle grid for DOA estimation"""

@@ -153,7 +153,7 @@ model_config = \
 
 training_params = {
     # "batch_size": 128,  # Note: This is legacy parameter, actual batch size is handled by snapshots
-    "epochs": 10,
+    "epochs": 300,
     "loss_type": "spectrum",  # rmspe, spectrum, unsupervised
     "optimizer": "Adam",  # Adam, SGD
     "scheduler": None,  # StepLR, ReduceLROnPlateau, None
@@ -162,16 +162,18 @@ training_params = {
     "weight_decay": 0.0,
     "use_wandb": True,
     "gradients_debug": False,  # Enable detailed gradient and parameter debugging
-    "target_spectrum_power": 2,  # Target spectrum power for guided learning (ONLY USING SPECTRUM LOSS) - None/0 to disable, else target value
+    "target_spectrum_power": 1,  # Target spectrum power for guided learning (ONLY USING SPECTRUM LOSS) - None/0 to disable, else target value
     "log_loss_spectrum": True,  # Use the log of the spectrum powers for the spectrum loss to prevent peaks exploding
     "sqrt_log_loss_spectrum": False,  # Use sqrt(log) of the spectrum powers. Takes precedence over log_loss_spectrum if both are True
     "max_grad_norm": 1e-2,  # Maximum gradient norm for clipping. If None, no clipping. If float/int, clip gradients to this norm
-    "gains_reg_coeff": 1,  # Coefficient for gains regularization. If 0, None, or not set, regularization is disabled
-    "normalized_target_gains_norm": 1.5  # Expected normalized norm of the gains vector (default: 1.0)
+    "gains_reg_coeff": 100,  # Coefficient for gains regularization. If 0, None, or not set, regularization is disabled
+    "normalized_target_gains_norm": 1  # Expected normalized norm of the gains vector (default: 1.0)
 }
 
 plotting_params = {
     "plot_physical_spectrum": True,  # Plot diffMUSIC spectrum using actual physical parameters for comparison
+    "plot_nominal_spectrum": True,  # Plot diffMUSIC spectrum using nominal parameters (ULA + unit gains) for comparison
+    "log_spectrum": True,  # Plot all spectrums in log scale (y-axis)
 }
 
 
