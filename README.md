@@ -3,8 +3,8 @@
 - Python 3.10+
 ### Installation
 - Init a new virtual environment
-  - For conda, `conda env create -f full_environment.yml` and active it by `conda activate ai_subspace_env`
-  - For venv, `py -m venv ai_subspace_env`
+  - For conda, `conda env create -f full_environment.yml` and active it by `conda activate calibration_through_doa`
+  - For venv, `py -m venv calibration_through_doa`
     - Activate the virtual environment
     - Install the required packages by running `pip install -r requirements.txt`
 
