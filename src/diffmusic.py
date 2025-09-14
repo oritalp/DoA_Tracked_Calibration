@@ -379,7 +379,8 @@ class DiffMUSIC(SubspaceMethod):
                 weights = torch.softmax(masked_spectrum, dim=0)
                 
                 # Compute weighted average of angles (Equation 13 from paper)
-                masked_angles = self.angles_grid[mask_indices].to(self.device)
+                angles_grid = self.angles_grid.to(self.device)
+                masked_angles = angles_grid[mask_indices]
                 estimated_angles[batch, source_idx] = torch.sum(weights * masked_angles)
 
             peaks_masks.append(batch_masks)  # Store masks for unsupervised loss
@@ -392,13 +393,17 @@ class DiffMUSIC(SubspaceMethod):
         Create angular mask around peak center (ΠL operation from paper)
         
         Args:
-            center_idx: Center index of the peak
+            center_idx: Center index of the peak (can be tensor or int)
             spectrum_length: Length of the spectrum
             
         Returns:
             Indices for the angular mask
         """
         half_window = self.window_size // 2
+        
+        # Convert center_idx to Python int if it's a tensor
+        if isinstance(center_idx, torch.Tensor):
+            center_idx = center_idx.item()
         
         # Create mask indices around center
         start_idx = max(0, center_idx - half_window)
@@ -476,18 +481,21 @@ class DiffMUSICLoss(nn.Module):
     """
     
     def __init__(self, loss_type: str = "rmspe", gains_reg_coeff: float = 0.0, 
-                 normalized_target_gains_norm: float = 1.0, **kwargs):
+                 normalized_target_gains_norm: float = 1.0, angular_drift_reg_coeff: float = 0.0, **kwargs):
         """
         Args:
             loss_type: "rmspe" for LSL,θ, "spectrum" for LSL,P, or "unsupervised" for LUL
             gains_reg_coeff: Coefficient for gains regularization. If 0, regularization is disabled
             normalized_target_gains_norm: Target normalized norm of the gains vector (default: 1.0)
+            angular_drift_reg_coeff: Coefficient for angular drift regularization. If 0, regularization is disabled
             **kwargs: Additional arguments for specific loss functions
         """
         super(DiffMUSICLoss, self).__init__()
         self.loss_type = loss_type
         self.gains_reg_coeff = gains_reg_coeff
         self.normalized_target_gains_norm = normalized_target_gains_norm
+        self.angular_drift_reg_coeff = angular_drift_reg_coeff
+        self.initial_pred_angles = None  # Will be set after first forward pass if angular drift reg is enabled
         
         # Import loss functions from metrics
         from src.metrics import RMSPELoss, SpectrumLoss, UnsupervisedSpectrumLoss
@@ -500,6 +508,19 @@ class DiffMUSICLoss(nn.Module):
             self.loss_fn = UnsupervisedSpectrumLoss()
         else:
             raise ValueError(f"Unknown loss type: {loss_type}")
+    
+    def set_initial_pred_angles(self, initial_angles: torch.Tensor):
+        """
+        Set the initial predicted angles for angular drift regularization
+        
+        Args:
+            initial_angles: Initial predicted angles, shape (batch_size, number_of_sources)
+                           Note: These come from _differentiable_peak_finder in amplitude order (strongest peaks first)
+        """
+        # Sort the initial angles BY ANGLE VALUE to ensure consistent alignment
+        # This is necessary because _differentiable_peak_finder returns angles in amplitude order, not angle order
+        sorted_angles, _ = torch.sort(initial_angles, dim=1)
+        self.initial_pred_angles = sorted_angles.detach()  # Detach to avoid gradients through initial angles
     
     def _compute_gains_regularization(self, algorithm):
         """
@@ -536,6 +557,35 @@ class DiffMUSICLoss(nn.Module):
         
         return regularization_loss
     
+    def _compute_angular_drift_regularization(self, current_angles: torch.Tensor):
+        """
+        Compute angular drift regularization term: angular_drift_reg_coeff * ||current_angles - initial_pred_angles||_L2^2
+        
+        Args:
+            current_angles: Current predicted angles, shape (batch_size, number_of_sources)
+                           Note: These come from _differentiable_peak_finder in amplitude order (strongest peaks first)
+            
+        Returns:
+            regularization_loss: Computed angular drift regularization loss (tensor)
+        """
+        if (self.angular_drift_reg_coeff == 0 or self.initial_pred_angles is None or 
+            self.loss_type != "unsupervised"):
+            return torch.tensor(0.0, device=current_angles.device, requires_grad=True)
+        
+        # Sort current angles BY ANGLE VALUE to align with sorted initial angles
+        # This is necessary because both initial and current angles come in amplitude order from _differentiable_peak_finder
+        # We need to compare corresponding peaks by angle value, not amplitude order
+        sorted_current_angles, _ = torch.sort(current_angles, dim=1)
+        
+        # Ensure initial angles are on the same device and dtype as current angles
+        initial_angles = self.initial_pred_angles.to(current_angles.device)
+        
+        # Compute L2 loss between sorted angle vectors
+        angle_diff = sorted_current_angles - initial_angles
+        regularization_loss = self.angular_drift_reg_coeff * torch.mean(angle_diff ** 2)
+        
+        return regularization_loss
+    
     def forward(self, algorithm=None, return_components=False, **kwargs):
         """
         Forward pass - delegates to appropriate loss function and adds regularization
@@ -558,14 +608,25 @@ class DiffMUSICLoss(nn.Module):
         # Compute regularization loss
         regularization_loss = self._compute_gains_regularization(algorithm) if algorithm is not None else torch.tensor(0.0)
         
+        # Compute angular drift regularization (only for unsupervised loss with predictions)
+        angular_drift_loss = torch.tensor(0.0, device=torch.device('cuda' if torch.cuda.is_available() else 'cpu'), requires_grad=True)
+        if (algorithm is not None and 'predictions' in kwargs and 
+            self.loss_type == "unsupervised" and self.angular_drift_reg_coeff > 0):
+            angular_drift_loss = self._compute_angular_drift_regularization(kwargs['predictions'])
+        
+        # Total regularization
+        total_regularization = regularization_loss + angular_drift_loss
+        
         # Total loss
-        total_loss = primary_loss + regularization_loss
+        total_loss = primary_loss + total_regularization
         
         if return_components:
             return {
                 'total_loss': total_loss,
                 'primary_loss': primary_loss,
-                'regularization_loss': regularization_loss
+                'regularization_loss': regularization_loss,
+                'angular_drift_loss': angular_drift_loss,
+                'weighted_regularization_loss': total_regularization
             }
         else:
             return total_loss

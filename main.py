@@ -35,23 +35,9 @@ import torch
 # Suppress NumPy 2.0 deprecation warnings
 warnings.filterwarnings("ignore", category=DeprecationWarning, module="numpy")
 
-#TODO: 
-# Right now, there are major duplications in the code which is very bad. Specifically, the multiloss run function
-# is almost identical to the single loss run function. It can be easily alleviated but unifying these two functions and
-# check if the length of the loss functions is 1 or more. Sheli's additions are not supporting the optimization of the window 
-# size.
 
 
-#NOTE:
-# points for the future:
 
-# 1. The unsupervised loss suffers from problems at the endfire due to smaller number of samples in the window.
-# We need to think about maybe mirroring at the edges or renormalizing the Jain's index somehow.
-
-# 2. The losses minimize thr rmspe, leading to higher DoA accuracy, but the actual configuration paraameters
-# diverge heavily. It'll be interesting to compare the learned steering matrix itself to the physical one although we will get
-# probably the same conclusion.
-# SUPER IMPORTANT IMPLICATION: If we don't really learn the rifht parameters, tracking with this garbage observations will not lead us far.
 
 # Initialization
 os.system("cls||clear")
@@ -104,8 +90,8 @@ simulation_commands = {
     "create_data": True,
     "save_data": False,  # Save data after creation
     "plot_results": True,  # Plot data after creation
-    "multi_loss_comparison": False,  # Enable multi-loss spectrum and learned parameters comparison, if multiple experiments then need to be False
-    "spectrum_loss_functions": ["rmspe"],  # Loss functions to compare
+    "multi_loss_comparison": False,  # CURENTLY NOT USED - leftovers from Sheli's variant.
+    "spectrum_loss_functions": ["rmspe"],  # CURENTLY NOT USED - leftovers from Sheli's variant.
     "data_loading_path": "datasets/N:16_M:5_T:100_snr:10_location_pert_boundary:0.25_gain_perturbation_var:0.36_seed:42/03_06_2025_15_06/data.pkl"
     # This is the path to the data file, ONLY USED if CREATE_DATA is False!
     # By now, this gets set manually.
@@ -115,7 +101,7 @@ system_model_params = {
     "N": 16,  # number of antennas
     "M": 5,  # number of sources
     "T": 100,  # number of snapshots
-    "snr": 0,  # if defined, values in scenario_dict will be ignored 
+    "snr": 10,  # if defined, values in scenario_dict will be ignored 
     "bias": 0, # steering vector bias error
     "sv_noise_var": 0.0, # steering vector additive gaussian error noise variance
     "doa_range": 80, # The range of the DOA values [-doa_range, doa_range]
@@ -127,7 +113,7 @@ system_model_params = {
     # insert any valid float between 0 and wavelength/4 or "wavelength/n" to use with reference to the wavelength
     
     "gain_perturbation_var": 0.36, # The variance of the gain perturbation
-    "seed": 1,  # Seed for reproducibility
+    "seed": 2,  # Seed for reproducibility
     ############################### Fixed for now ##################################
     "field_type": "Far",  # Near, Far
     "signal_type": "Narrowband",  # Narrowband, broadband
@@ -141,11 +127,11 @@ model_config = \
     # Case 1: Fixed integer window size (original behavior)
     # "softmax_window_size": 21,
     
-    # Case 2: Relative window size (float between 0-1)
-    "softmax_window_size": 0.03,  # % of angle grid length
+    # # Case 2: Relative window size (float between 0-1)
+    # "softmax_window_size": 0.03,  # % of angle grid length
     
-    # # Case 3: Window size optimization (array/list of values)
-    # "softmax_window_size": np.arange(0.01, 0.04, 0.01),  # range of % relative window sizes
+    # Case 3: Window size optimization (array/list of values)
+    "softmax_window_size": np.arange(0.01, 0.2, 0.01),  # range of % relative window sizes
     # # "softmax_window_size": [15, 21, 27, 33],  # Absolute sizes
     # # "softmax_window_size": [0.25, 21, 0.35, 27],  # Mixed relative and absolute
 }
@@ -154,10 +140,10 @@ model_config = \
 training_params = {
     # "batch_size": 128,  # Note: This is legacy parameter, actual batch size is handled by snapshots
     "epochs": 300,
-    "loss_type": "spectrum",  # rmspe, spectrum, unsupervised
+    "loss_type": "unsupervised",  # rmspe, spectrum, unsupervised
     "optimizer": "Adam",  # Adam, SGD
     "scheduler": None,  # StepLR, ReduceLROnPlateau, None
-    "learning_rate": 1e-3,
+    "learning_rate": 4e-3,
     "step_size": 50,
     "weight_decay": 0.0,
     "use_wandb": True,
@@ -166,8 +152,9 @@ training_params = {
     "log_loss_spectrum": True,  # Use the log of the spectrum powers for the spectrum loss to prevent peaks exploding
     "sqrt_log_loss_spectrum": False,  # Use sqrt(log) of the spectrum powers. Takes precedence over log_loss_spectrum if both are True
     "max_grad_norm": 1e-2,  # Maximum gradient norm for clipping. If None, no clipping. If float/int, clip gradients to this norm
-    "gains_reg_coeff": 100,  # Coefficient for gains regularization. If 0, None, or not set, regularization is disabled
-    "normalized_target_gains_norm": 1  # Expected normalized norm of the gains vector (default: 1.0)
+    "gains_reg_coeff": 1000,  # Coefficient for gains regularization. If 0, None, or not set, regularization is disabled
+    "normalized_target_gains_norm": 1,  # Expected normalized norm of the gains vector (default: 1.0)
+    "angular_drift_reg_coeff": 0  # ONLY FOR UNSUPERVISED LOSS FOR NOW - Coefficient for angular drift regularization (prevents drift from initial predictions). If 0, None, or not set, regularization is disabled
 }
 
 plotting_params = {
@@ -204,6 +191,7 @@ def parse_arguments():
     parser.add_argument('-step', '--step_size', type=int, help='Step size', default=None)
     parser.add_argument('--target_spectrum_power', type=float, help='Target spectrum power for guided learning (None to disable)', default=None)
     parser.add_argument('--max_grad_norm', type=float, help='Maximum gradient norm for clipping (None to disable)', default=None)
+    parser.add_argument('--angular_drift_reg_coeff', type=float, help='Angular drift regularization coefficient (prevents drift from initial predictions)', default=None)
     parser.add_argument('--sqrt_log_loss_spectrum', action="store_true", help='Use sqrt(log) for spectrum loss')
 
     parser.add_argument('-w', '--wandb', action="store_true", help='Use wandb')
@@ -275,6 +263,8 @@ if __name__ == "__main__":
         training_params["target_spectrum_power"] = args.target_spectrum_power
     if args.max_grad_norm is not None:
         training_params["max_grad_norm"] = args.max_grad_norm
+    if args.angular_drift_reg_coeff is not None:
+        training_params["angular_drift_reg_coeff"] = args.angular_drift_reg_coeff
     if args.sqrt_log_loss_spectrum:
         training_params["sqrt_log_loss_spectrum"] = args.sqrt_log_loss_spectrum
 

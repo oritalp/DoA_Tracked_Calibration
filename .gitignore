@@ -14,3 +14,4 @@ interactive.sh
 *.pth
 datasets/
 results/
+CLAUDE.local*

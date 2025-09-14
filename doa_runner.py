@@ -223,6 +223,10 @@ class DoARunner:
         if hasattr(self.system_params, 'normalized_target_gains_norm'):
             loss_kwargs['normalized_target_gains_norm'] = self.system_params.normalized_target_gains_norm
         
+        # Add angular drift regularization parameters
+        if hasattr(self.system_params, 'angular_drift_reg_coeff'):
+            loss_kwargs['angular_drift_reg_coeff'] = self.system_params.angular_drift_reg_coeff
+        
         self.loss_fn = self.factory.create_loss_function(loss_type, **loss_kwargs)
         
         # Create optimizer
@@ -390,6 +394,10 @@ class DoARunner:
             # Create fresh algorithm instance with reset parameters
             self.algorithm = self._create_fresh_algorithm(window_size)
             
+            # Reset initial angles capture flag for each trial
+            if hasattr(self, '_initial_angles_captured'):
+                delattr(self, '_initial_angles_captured')
+            
             # Setup fresh training components and wandb
             if self._needs_training():
                 self._setup_training()
@@ -539,6 +547,7 @@ class DoARunner:
                         "loss/total_loss": loss_components['total_loss'].item(),
                         "loss/primary_loss": loss_components['primary_loss'].item(),
                         "loss/regularization_loss": loss_components['regularization_loss'].item(),
+                        "loss/angular_drift_loss": loss_components.get('angular_drift_loss', torch.tensor(0.0)).item(),
                         "loss/rmspe_loss": rmspe_loss if rmspe_loss is not None else 0.0,
                         "parameters/position_l2_diff": position_l2_diff,
                         "parameters/gain_l2_diff": gain_l2_diff,
@@ -598,6 +607,17 @@ class DoARunner:
         if peaks_masks is None:
             warnings.warn("No peaks masks returned from algorithm, something is weird and you need to check that.")
         
+        # Handle initial angles capture for angular drift regularization
+        if (not hasattr(self, '_initial_angles_captured') and 
+            hasattr(self.system_params, 'angular_drift_reg_coeff') and 
+            self.system_params.angular_drift_reg_coeff > 0 and
+            hasattr(self.loss_fn, 'loss_type') and self.loss_fn.loss_type == 'unsupervised'):
+            
+            # Capture initial predicted angles
+            self.loss_fn.set_initial_pred_angles(estimated_angles)
+            self._initial_angles_captured = True
+            print(f"  Captured initial predicted angles for angular drift regularization: {estimated_angles.detach().cpu().numpy()}")
+        
         # Compute loss based on loss type
         loss_kwargs = {
             'predictions': estimated_angles,
@@ -620,7 +640,13 @@ class DoARunner:
             loss_components = loss_result
         else:
             loss = loss_result
-            loss_components = {'total_loss': loss, 'primary_loss': loss, 'regularization_loss': torch.tensor(0.0), 'weighted_regularization_loss': torch.tensor(0.0)}
+            loss_components = {
+                'total_loss': loss, 
+                'primary_loss': loss, 
+                'regularization_loss': torch.tensor(0.0), 
+                'angular_drift_loss': torch.tensor(0.0),
+                'weighted_regularization_loss': torch.tensor(0.0)
+            }
         
         # DIAGNOSTIC CODE - Track parameters before backward pass if debugging enabled
         if getattr(self.system_params, 'gradients_debug', False):
@@ -1174,6 +1200,14 @@ class DoARunner:
                                           physical_array=specified_array, 
                                           physical_gains=specified_gains)
             
+            # Set the optimal window size if available (from window size optimization results)
+            optimal_window_size = self.results.get('optimal_window_size', None)
+            if optimal_window_size is not None:
+                specified_diffmusic.set_window_size(optimal_window_size)
+            elif hasattr(self.algorithm, 'window_size'):
+                # Fallback to current algorithm's window size if no optimal size recorded
+                specified_diffmusic.set_window_size(0.03)
+            
             specified_diffmusic.eval()  # Set to evaluation mode
             
             # Move to same device as current model if available
@@ -1208,6 +1242,48 @@ class DoARunner:
             import traceback
             traceback.print_exc()
 
+    def _plot_parameter_row(self, ax, positions_wl, gains, y_position, color, edge_color, 
+                           alpha, label, label_text, max_magnitude, max_radius):
+        """
+        Helper function to plot a single row of parameters (positions and gains)
+        
+        Args:
+            ax: Matplotlib axis object
+            positions_wl: Antenna positions in wavelength units
+            gains: Complex antenna gains
+            y_position: Y coordinate for this row
+            color: Face color for circles
+            edge_color: Edge color for circles
+            alpha: Transparency level
+            label: Label for legend (only for first antenna)
+            label_text: Text label to display on the left
+            max_magnitude: Maximum gain magnitude for normalization
+            max_radius: Maximum circle radius
+        """
+        for j, (pos, gain) in enumerate(zip(positions_wl, gains)):
+            # Circle radius represents gain magnitude, normalized by max magnitude
+            radius = (abs(gain) / max_magnitude) * max_radius
+            
+            # Circle color and segment angle represent gain phase
+            phase = np.angle(gain)
+            
+            # Draw circle
+            circle = patches.Circle((pos, y_position), radius, 
+                                    facecolor=color, alpha=alpha,
+                                    edgecolor=edge_color, 
+                                    linewidth=2,
+                                    label=label if j == 0 else "")
+            ax.add_patch(circle)
+            
+            # Draw phase segment (line from center to edge)
+            segment_x = pos + radius * np.cos(phase)
+            segment_y = y_position + radius * np.sin(phase)
+            ax.plot([pos, segment_x], [y_position, segment_y], color=edge_color, linewidth=2)
+        
+        # Add label for this parameter type
+        ax.text(positions_wl[0] - 0.5, y_position, label_text, 
+            ha='right', va='center', fontsize=12, fontweight='bold', color=edge_color)
+
     def plot_learned_parameters(self, path: Path):
         """
         Plot learned parameters using data from self.results (from best window size run)
@@ -1237,89 +1313,62 @@ class DoARunner:
         if physical_gains is not None and isinstance(physical_gains, torch.Tensor):
             physical_gains = physical_gains.cpu().numpy()
         
-        # Create figure
-        fig, ax = plt.subplots(1, 1, figsize=(16, 6))
+        # Create nominal parameters (ULA + unit gains)
+        N = self.system_params.N
+        wavelength = self.system_params.wavelength
+        
+        # Generate ULA positions: evenly spaced at λ/2, starting from 0
+        nominal_positions = np.arange(N) * (wavelength / 2)
+        nominal_gains = np.ones(N, dtype=complex) / np.sqrt(N)  # Unit magnitude, zero phase
+        
+        # Create figure (increased height for three rows)
+        fig, ax = plt.subplots(1, 1, figsize=(16, 8))
         
         # Convert positions to wavelength units for display
-        wavelength = self.system_params.wavelength
         learned_positions_wl = learned_positions / (wavelength / 2)
+        nominal_positions_wl = nominal_positions / (wavelength / 2)
         
         # Find maximum magnitude across all gains for normalization
         all_gain_magnitudes = [abs(gain) for gain in learned_gains]
+        # all_gain_magnitudes.extend([abs(gain) for gain in nominal_gains])  # Include nominal gains
         if physical_array is not None and physical_gains is not None:
             all_gain_magnitudes.extend([abs(gain) for gain in physical_gains])
         
         max_magnitude = max(all_gain_magnitudes)
-        max_radius = 0.45  # Fixed size for the largest circle
+        max_radius = 0.35  # Slightly smaller for three rows
         
         # Plot learned parameters (top row)
-        y_learned = 1
-        for j, (pos, gain) in enumerate(zip(learned_positions_wl, learned_gains)):
-            # Circle radius represents gain magnitude, normalized by max magnitude
-            radius = (abs(gain) / max_magnitude) * max_radius
-            
-            # Circle color and segment angle represent gain phase
-            phase = np.angle(gain)
-            
-            # Draw circle
-            circle = patches.Circle((pos, y_learned), radius, 
-                                    facecolor='blue', alpha=0.3,
-                                    edgecolor='blue', 
-                                    linewidth=2,
-                                    label='Learned' if j == 0 else "")
-            ax.add_patch(circle)
-            
-            # Draw phase segment (line from center to edge)
-            segment_x = pos + radius * np.cos(phase)
-            segment_y = y_learned + radius * np.sin(phase)
-            ax.plot([pos, segment_x], [y_learned, segment_y], 'b-', linewidth=2)
+        y_learned = 1.5
+        self._plot_parameter_row(ax, learned_positions_wl, learned_gains, y_learned, 
+                                'blue', 'blue', 0.3, 'Learned', 'LEARNED', max_magnitude, max_radius)
         
-        # Add label for learned parameters
-        ax.text(learned_positions_wl[0] - 0.5, y_learned, 'LEARNED', 
-            ha='right', va='center', fontsize=12, fontweight='bold', color='blue')
-        
-        # Plot physical parameters if available (bottom row)
+        # Plot physical parameters if available (middle row)
         if physical_array is not None and physical_gains is not None:
             physical_positions_wl = physical_array / (wavelength / 2)
-            y_physical = -1
-            
-            for j, (pos, gain) in enumerate(zip(physical_positions_wl, physical_gains)):
-                # Circle radius represents gain magnitude, normalized by max magnitude
-                radius = (abs(gain) / max_magnitude) * max_radius
-                phase = np.angle(gain)
-                
-                # Draw circle
-                circle = patches.Circle((pos, y_physical), radius, 
-                                        facecolor='lightgray', 
-                                        edgecolor='black', 
-                                        linewidth=2, 
-                                        alpha=0.7,
-                                        label='Physical' if j == 0 else "")
-                ax.add_patch(circle)
-                
-                # Draw phase segment
-                segment_x = pos + radius * np.cos(phase)
-                segment_y = y_physical + radius * np.sin(phase)
-                ax.plot([pos, segment_x], [y_physical, segment_y], 'k-', linewidth=2)
-            
-            # Add label for physical parameters
-            ax.text(physical_positions_wl[0] - 0.5, y_physical, 'PHYSICAL', 
-                ha='right', va='center', fontsize=12, fontweight='bold', color='black')
+            y_physical = 0
+            self._plot_parameter_row(ax, physical_positions_wl, physical_gains, y_physical, 
+                                    'lightgray', 'black', 0.7, 'Physical', 'PHYSICAL', max_magnitude, max_radius)
+        
+        # Plot nominal parameters (bottom row)
+        y_nominal = -1.5
+        self._plot_parameter_row(ax, nominal_positions_wl, nominal_gains, y_nominal, 
+                                'lightgreen', 'darkgreen', 0.7, 'Nominal (ULA)', 'NOMINAL', max_magnitude, max_radius)
         
         # Set axis limits and labels
         all_positions = list(learned_positions_wl)
+        all_positions.extend(nominal_positions_wl)
         if physical_array is not None:
             all_positions.extend(physical_positions_wl)
         
         ax.set_xlim(min(all_positions) - 1, max(all_positions) + 1)
-        ax.set_ylim(-2, 2)
+        ax.set_ylim(-2.5, 2.5)
         ax.set_xlabel('x [λ/2]', fontsize=12, fontweight='bold')
         ax.set_ylabel('')
         
         # Create title with performance info
         rmspe = self.results.get('rmspe', 0)
         loss_type = getattr(self.system_params, 'loss_type', 'unknown')
-        title = f"Learned Parameters ({loss_type.upper()}) - RMSPE: {rmspe:.6f}° after gains normalization"
+        title = f"Parameter Comparison ({loss_type.upper()}) - RMSPE: {rmspe:.6f}° after gains normalization"
         ax.set_title(title, fontsize=14, fontweight='bold')
         
         ax.grid(True, alpha=0.3)
